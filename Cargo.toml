@@ -12,7 +12,7 @@
 [package]
 edition = "2021"
 name = "prompthive"
-version = "0.2.2"
+version = "0.2.3"
 authors = ["Jory Pestorious <jory@pestorious.com>"]
 build = false
 include = [
