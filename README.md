@@ -10,7 +10,7 @@
 ## TL;DR
 
 ```bash
-# Install (Latest: v0.2.3)
+# Install (Latest: v0.2.4)
 cargo install prompthive
 # OR: curl -sSL https://prompthive.sh/install.sh | bash
 
@@ -30,7 +30,7 @@ git diff main...HEAD | ph use essentials/pr | claude -p | gh pr create --body-fi
 
 **Why?** Because copy-pasting from ChatGPT history takes 30+ seconds. PromptHive operations average 11ms.
 
-**Current Version**: 0.2.3 - Open source with community registry, instant authentication, team collaboration, and prompt sharing. All features included, no paid tiers.
+**Current Version**: 0.2.4 - Open source with community registry, instant authentication, team collaboration, and prompt sharing. All features included, no paid tiers.
 
 > **🚀 Philosophy**: [Terminal-First Development](http://jorypestorious.com/blog/terminal-velocity/) | [Spec-Driven AI Engineering](http://jorypestorious.com/blog/ai-engineer-spec/)  
 > **📁 Documentation**: See README.md for complete usage guide
