@@ -80,15 +80,20 @@ impl IoOptions {
         prompt_name: Option<&str>,
         start: Instant,
     ) -> Result<()> {
-        let is_tty = std::io::stdout().is_terminal();
+        let is_tty = std::env::var("PROMPTHIVE_TEST_MODE").map(|v| v == "tty").unwrap_or_else(|_| std::io::stdout().is_terminal());
         let should_copy_to_clipboard = self.should_copy_to_clipboard(is_tty);
 
         // Copy to clipboard if determined by smart defaults
+        let mut clipboard_success = false;
         if should_copy_to_clipboard {
             let mut clipboard_handler = Clipboard::new();
-            clipboard_handler.copy_to_clipboard(content)?;
+            clipboard_success = clipboard_handler.copy_to_clipboard(content)?;
             if !self.quiet {
-                println!("Copied to clipboard ({}ms)", start.elapsed().as_millis());
+                if clipboard_success {
+                    println!("Copied to clipboard ({}ms)", start.elapsed().as_millis());
+                } else {
+                    eprintln!("Clipboard unavailable - showing content below:");
+                }
             }
         }
 
@@ -166,12 +171,17 @@ impl IoOptions {
                 print!("{}", content);
             }
         } else {
-            // TTY mode: only output for non-text-transform commands or when quiet
+            // TTY mode: handle clipboard success/failure properly
             match self.command_category {
                 CommandCategory::TextTransform => {
-                    // Text transform commands in TTY: content goes to clipboard, not stdout
-                    // Only output if quiet mode (no clipboard message shown)
-                    if self.quiet && self.save.is_none() && self.append.is_none() && self.file.is_none() {
+                    // Text transform commands in TTY: content goes to clipboard OR stdout if clipboard failed
+                    if should_copy_to_clipboard {
+                        // If clipboard failed, show content as fallback
+                        if !clipboard_success && self.save.is_none() && self.append.is_none() && self.file.is_none() {
+                            print!("{}", content);
+                        }
+                    } else if self.quiet && self.save.is_none() && self.append.is_none() && self.file.is_none() {
+                        // Quiet mode: always output to stdout
                         print!("{}", content);
                     }
                 }
@@ -255,15 +265,19 @@ impl IoOptions {
         description: &str,
         start: Instant,
     ) -> Result<()> {
-        let is_tty = std::io::stdout().is_terminal();
+        let is_tty = std::env::var("PROMPTHIVE_TEST_MODE").map(|v| v == "tty").unwrap_or_else(|_| std::io::stdout().is_terminal());
         let should_copy_to_clipboard = self.clipboard || (!self.quiet && is_tty);
 
         // Copy to clipboard if requested
         if should_copy_to_clipboard {
             let mut clipboard_handler = Clipboard::new();
-            clipboard_handler.copy_to_clipboard(content)?;
+            let clipboard_success = clipboard_handler.copy_to_clipboard(content)?;
             if !self.quiet {
-                println!("Copied to clipboard ({}ms)", start.elapsed().as_millis());
+                if clipboard_success {
+                    println!("Copied to clipboard ({}ms)", start.elapsed().as_millis());
+                } else {
+                    eprintln!("Clipboard unavailable - showing content below:");
+                }
             }
         }
 

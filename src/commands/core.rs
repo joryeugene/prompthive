@@ -76,7 +76,11 @@ pub fn handle_use(
                         start.elapsed().as_millis(),
                     );
                     let _ = history_tracker.record(entry);
-                    eprintln!("Error: No prompt found matching '{}'", name);
+                    
+                    // Use the error helper for better error messages
+                    use crate::error_help;
+                    let available_prompts = storage.list_prompts().unwrap_or_default();
+                    eprintln!("{}", error_help::format_prompt_not_found(name, &available_prompts));
                     std::process::exit(1);
                 }
             }
@@ -355,6 +359,24 @@ pub fn handle_edit(storage: &Storage, name: &str, start: Instant) -> Result<()> 
     // Use fuzzy matching to resolve the prompt name
     let resolved_name = resolve_prompt_name(storage, name)?;
     let prompt_path = storage.prompt_path(&resolved_name);
+
+    // Check if we can write to the file before launching editor
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if prompt_path.exists() {
+            let metadata = fs::metadata(&prompt_path)?;
+            let permissions = metadata.permissions();
+            let mode = permissions.mode();
+            
+            // Check if file is writable by user
+            if mode & 0o200 == 0 {
+                use crate::error_help;
+                let error_msg = error_help::format_permission_error(&prompt_path.display().to_string(), "edit");
+                return Err(anyhow::anyhow!("{}", error_msg));
+            }
+        }
+    }
 
     // Get editor from environment or config
     let editor = if cfg!(test) {

@@ -45,6 +45,7 @@ pub mod clipboard;
 pub mod commands;
 pub mod common;
 pub mod edit;
+pub mod error_help;
 pub mod health;
 pub mod history;
 pub mod io_options;

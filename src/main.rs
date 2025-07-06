@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use std::env;
 use std::time::Instant;
+use prompthive::error_help;
 
 #[cfg(feature = "registry")]
 use prompthive::RegistryClient;
@@ -49,31 +50,82 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Initialize logging first
-    let log_config = LogConfig::from_env();
-    init_logging(log_config)?;
+    let start = Instant::now();
+    
+    // Parse CLI with custom error handling for better suggestions
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            // Check if this is an unknown command error
+            if let clap::error::ErrorKind::InvalidSubcommand = e.kind() {
+                let args: Vec<String> = env::args().collect();
+                if args.len() > 1 {
+                    let cmd = &args[1];
+                    let available_commands = vec![
+                        "use", "u", "show", "s", "new", "n", "edit", "e", "delete", "d", "rm",
+                        "ls", "l", "list", "find", "f", "tui", "t", "compose", "c", "clean", "x",
+                        "diff", "merge", "import", "version", "versions", "rollback", "rename", "r", "mv",
+                        "search", "install", "publish", "sync", "login", "logout", "banks", "init",
+                        "completion", "stats", "config"
+                    ];
+                    
+                    use crate::error_help;
+                    eprintln!("{}", error_help::format_command_typo(cmd, &available_commands));
+                    std::process::exit(1);
+                }
+            }
+            // For other errors, use the default clap error display
+            e.exit();
+        }
+    };
+
+    // Only initialize logging if explicitly requested via env var
+    if env::var("PROMPTHIVE_LOG_LEVEL").is_ok() {
+        let log_config = LogConfig::from_env();
+        init_logging(log_config)?;
+    }
 
     // Set up graceful shutdown handling
     let shutdown_handler = ShutdownHandler::new();
     shutdown_handler.setup_signal_handlers()?;
 
-    let start = Instant::now();
-    let cli = Cli::parse();
-
     // Initialize storage
     let storage = Storage::new()?;
     storage.init()?;
 
-    // Initialize telemetry (CRITICAL: was missing from registry version)
-    let mut telemetry = init_telemetry(storage.base_dir().to_path_buf()).ok();
+    // Initialize telemetry only if not in performance mode
+    let mut telemetry = if env::var("PROMPTHIVE_PERF_MODE").is_ok() {
+        None
+    } else {
+        init_telemetry(storage.base_dir().to_path_buf()).ok()
+    };
 
     // If no command provided, launch TUI if available, otherwise show help
     if cli.command.is_none() {
         #[cfg(feature = "tui")]
         {
-            use prompthive::tui::PromptTui;
-            let tui = PromptTui::new(&storage)?;
-            return tui.run(&storage);
+            // Check if we have a proper terminal for TUI
+            use std::io::IsTerminal;
+            let has_tty = std::io::stdout().is_terminal() && 
+                         std::env::var("PROMPTHIVE_TEST_MODE").is_err();
+            
+            if has_tty {
+                use prompthive::tui::PromptTui;
+                match PromptTui::new(&storage) {
+                    Ok(tui) => return tui.run(&storage),
+                    Err(_) => {
+                        // TUI initialization failed, fall back to help
+                        use clap::CommandFactory;
+                        Cli::command().print_help()?;
+                        return Ok(());
+                    }
+                }
+            } else {
+                // No TTY or in test mode, show help
+                use clap::CommandFactory;
+                Cli::command().print_help()?;
+                return Ok(());
+            }
         }
 
         #[cfg(not(feature = "tui"))]

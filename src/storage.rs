@@ -581,8 +581,22 @@ Provide the refactored code with explanations."#;
 
     pub fn read_prompt(&self, name: &str) -> Result<(PromptMetadata, String)> {
         let path = self.prompt_path(name);
-        let content = fs::read_to_string(&path)
-            .with_context(|| format!("Could not read prompt '{}'", name))?;
+        let content = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    use crate::error_help;
+                    let error_msg = error_help::format_file_not_found(&path.display().to_string());
+                    return Err(anyhow::anyhow!("{}", error_msg));
+                } else if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    use crate::error_help;
+                    let error_msg = error_help::format_permission_error(&path.display().to_string(), "read");
+                    return Err(anyhow::anyhow!("{}", error_msg));
+                } else {
+                    return Err(e).with_context(|| format!("Could not read prompt '{}'", name));
+                }
+            }
+        };
 
         // Parse frontmatter
         let (metadata, body) = self.parse_prompt(&content)?;
@@ -670,8 +684,18 @@ Provide the refactored code with explanations."#;
         // Format as markdown with frontmatter
         let content = format!("---\n{}---\n\n{}", yaml_metadata, body);
 
-        fs::write(&path, content)?;
-        Ok(())
+        match fs::write(&path, content) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    use crate::error_help;
+                    let error_msg = error_help::format_permission_error(&path.display().to_string(), "write");
+                    Err(anyhow::anyhow!("{}", error_msg))
+                } else {
+                    Err(e.into())
+                }
+            }
+        }
     }
 
     pub fn parse_prompt_content(&self, content: &str) -> Result<(PromptMetadata, String)> {
@@ -738,8 +762,14 @@ Provide the refactored code with explanations."#;
         if let (Some(0), Some(end_idx)) = (start, end) {
             // Parse YAML frontmatter
             let yaml_content = lines[1..=end_idx].join("\n");
-            let metadata: PromptMetadata =
-                serde_yaml::from_str(&yaml_content).context("Failed to parse prompt metadata")?;
+            let metadata: PromptMetadata = match serde_yaml::from_str(&yaml_content) {
+                Ok(metadata) => metadata,
+                Err(e) => {
+                    use crate::error_help;
+                    let error_msg = error_help::format_prompt_syntax_error("prompt file", &e.to_string());
+                    return Err(anyhow::anyhow!("{}", error_msg));
+                }
+            };
 
             // Get body (everything after second ---)
             let body = lines[(end_idx + 2)..].join("\n").trim().to_string();

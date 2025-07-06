@@ -35,15 +35,15 @@ impl Clipboard {
         Ok(())
     }
 
-    pub fn copy_to_clipboard(&mut self, content: &str) -> Result<()> {
+    pub fn copy_to_clipboard(&mut self, content: &str) -> Result<bool> {
         if let Some(ref mut ctx) = self.context {
-            ctx.set_contents(content.to_string())
-                .map_err(|e| anyhow::anyhow!("Failed to copy to clipboard: {}", e))?;
+            match ctx.set_contents(content.to_string()) {
+                Ok(_) => Ok(true), // Clipboard copy successful
+                Err(_) => Ok(false), // Clipboard failed
+            }
         } else {
-            // Fallback: print to stdout if clipboard not available
-            println!("{}", content);
+            Ok(false) // Clipboard not available
         }
-        Ok(())
     }
 
     pub fn write_to_stdout(&self, content: &str) -> Result<()> {
