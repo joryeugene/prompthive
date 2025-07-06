@@ -5,12 +5,14 @@
 [![License](https://img.shields.io/crates/l/prompthive.svg)](LICENSE)
 [![Documentation](https://img.shields.io/docsrs/prompthive)](https://docs.rs/prompthive)
 
-**Lightning-fast open source** prompt manager for developers. Terminal-native, 11ms average response, works with any AI tool.
+**Lightning-fast open source** prompt manager for developers. Terminal-native, sub-15ms operations, works with any AI tool.
+
+> **🚀 Website**: [prompthive.sh](https://prompthive.sh) | **🤝 Companion Tool**: [CalmHive](https://calmhive.com) for background AI processing
 
 ## TL;DR
 
 ```bash
-# Install (Latest: v0.2.4)
+# Install (Latest: v0.2.6)
 cargo install prompthive
 # OR: curl -sSL https://prompthive.sh/install.sh | bash
 
@@ -25,17 +27,17 @@ cat error.log | ph use essentials/debug | llm -p > analysis.md    # Non-interact
 claude "$(cat error.log | ph use essentials/debug)"              # Interactive debug session
 
 # 3. Complete PR workflows
-git diff main...HEAD | ph use essentials/pr | claude -p | gh pr create --body-file -  # Full automation
+git diff main...HEAD | ph use essentials/review | claude -p | gh pr create --body-file -  # Full automation
 ```
 
-**Why?** Because copy-pasting from ChatGPT history takes 30+ seconds. PromptHive operations average 11ms.
+**Why?** Because copy-pasting from ChatGPT history takes 30+ seconds. PromptHive operations average 8ms.
 
-**Current Version**: 0.2.4 - Open source with community registry, instant authentication, team collaboration, and prompt sharing. All features included, no paid tiers.
+**Current Version**: 0.2.6 - Open source with community registry, instant authentication, team collaboration, and prompt sharing. All features included, no paid tiers.
 
 > **🚀 Philosophy**: [Terminal-First Development](http://jorypestorious.com/blog/terminal-velocity/) | [Spec-Driven AI Engineering](http://jorypestorious.com/blog/ai-engineer-spec/)  
-> **📁 Documentation**: See README.md for complete usage guide
+> **📁 Complete Guide**: [prompthive.sh](https://prompthive.sh) | **🤖 Background AI**: [calmhive.com](https://calmhive.com)
 
-**Core Promise**: Every command under 80ms. It's a TOOL, not a LIBRARY.
+**Core Promise**: Every command under 15ms. It's a TOOL, not a LIBRARY.
 
 > **Unix Philosophy**: We don't run AI. We manage prompts perfectly, and pipe them to ANY AI tool you prefer. Like `npm` doesn't run JavaScript, we don't run prompts. We just make them instantly accessible.
 
@@ -48,7 +50,7 @@ llm "$(ph use essentials/debug)" error.log              # Chat with context
 
 # 2. Piped with -p flag (Non-interactive/Scripting):
 git diff --staged | ph use essentials/commit | claude -p | git commit -F -
-cat api.py | ph use essentials/document | llm -p > api-docs.md
+cat api.py | ph use essentials/review | llm -p > api-docs.md
 
 # 3. Direct Output (Auto-clipboard):
 ph use essentials/debug      # Output + clipboard for pasting into ChatGPT UI
@@ -75,7 +77,7 @@ curl -sSL https://prompthive.sh/install.sh | bash
 ph --version
 ```
 
-**Current Status**: Version 0.2.2 is available on crates.io. The install script automatically downloads pre-built binaries for your platform.
+**Current Status**: Version 0.2.6 is available on crates.io. The install script automatically downloads pre-built binaries for your platform.
 
 ### Shell Completions
 
@@ -106,15 +108,15 @@ git diff --staged | ph use essentials/commit | llm   # Perfect commit messages
 ph use essentials/debug "Fix auth timeout error" | claude # Analyze any error
 
 # Use immediately with real workflows
-git diff main...HEAD | ph use essentials/pr | llm     # Generate PR descriptions
-cat main.py | ph use essentials/code-review | llm    # Review any code
+git diff main...HEAD | ph use essentials/review | llm     # Generate PR descriptions
+cat main.py | ph use essentials/review | llm    # Review any code
 
 # Use with ANY AI tool (copies to clipboard if terminal, pipes if piped)
 ph use essentials/debug "Fix auth timeout" | llm     # LLM by Simon Willison
 git diff --staged | ph use essentials/commit | aichat    # AIChat
-git diff main...HEAD | ph use essentials/pr | claude  # Interactive PR description
-cat legacy-code.js | ph use essentials/refactor | mods    # Mods
-cat api.py | ph use essentials/generate-tests | sgpt      # Shell GPT
+git diff main...HEAD | ph use essentials/review | claude  # Interactive PR description
+cat legacy-code.js | ph use 10x/refactor | mods    # Mods
+cat api.py | ph use essentials/review | sgpt      # Shell GPT
 
 # Lightning-fast operations
 ph ls                                      # List all prompts
@@ -160,7 +162,7 @@ ph f debug   # Fuzzy finds essentials/debug-error instantly
 
 **See this README for complete documentation.**
 
-## Commands (v0.2.2)
+## Commands (v0.2.6)
 
 ```bash
 ph use <name>         # Use a prompt (u) - auto-clipboard, save, append, file
@@ -442,7 +444,7 @@ ph use life/habit "Morning meditation" -a habits/meditation-log
 # Combine with other tools
 alias morning='claude "$(git log --since=yesterday | ph use journal/standup)"'
 alias debug='ph use essentials/debug | tee debug.log | claude'
-alias review='gh pr view --json files | ph use essentials/code-review | claude -p'
+alias review='gh pr view --json files | ph use essentials/review | claude -p'
 
 # Scheduled prompts
 crontab -e
@@ -521,16 +523,16 @@ cat error.log | ph use essentials/debug | aichat
 ph use essentials/debug "Fix timeout in API calls" | claude
 
 # 📝 Generate PR descriptions
-git diff main...HEAD | ph use essentials/pr | claude
+git diff main...HEAD | ph use essentials/review | claude
 
 # 🧪 Create tests from code
-cat src/api.js | ph use essentials/generate-tests | llm > src/api.test.js
+cat src/api.js | ph use essentials/review | llm > src/api.test.js
 
 # 📚 Document your code
 cat complex-function.py | ph use essentials/docstring | llm
 
 # 🔍 Code review helper
-git show HEAD | ph use essentials/code-review | aichat > review-notes.md
+git show HEAD | ph use essentials/review | aichat > review-notes.md
 ```
 
 ### Advanced Workflows
@@ -557,7 +559,7 @@ cat old-api.py | \
 ```bash
 # AI-Powered Git Workflow
 alias smart-commit='git diff --staged | ph use commit-message | llm | git commit -F -'
-alias smart-pr='git diff main...HEAD | ph use essentials/pr | claude -p | gh pr create --body-file -'
+alias smart-pr='git diff main...HEAD | ph use essentials/review | claude -p | gh pr create --body-file -'
 
 # Automated Code Review Pipeline
 function ai-review() {
@@ -627,48 +629,17 @@ ph use debug "Fix this: $(cat error.log)" | aichat
 
 ## 🏦 Prompt Banks - Instant Productivity
 
-### Built-in Banks Ready to Use
+### Built-in Prompts Ready to Use
 ```bash
 # essentials/ - Core developer workflows
-ph use essentials/commit         # Perfect git commits
-ph use essentials/debug-error    # Debug any error  
-ph use essentials/code-review    # Thorough code reviews
-ph use essentials/pr            # PR descriptions
-ph use essentials/refactor      # Code refactoring
+ph use essentials/commit         # Generate conventional commit message from diff
+ph use essentials/debug          # Analyze errors and suggest fixes  
+ph use essentials/review         # Comprehensive code review
 
-# professional/ - Business communication
-ph use professional/email-reply  # Professional email responses
-ph use professional/meeting-notes # Structured meeting documentation
-ph use professional/proposal     # Business proposals
-ph use professional/status-update # Project status reports
-
-# coding-patterns/ - Design patterns & best practices  
-ph use coding-patterns/api-design     # RESTful API design
-ph use coding-patterns/error-handling # Robust error handling
-ph use coding-patterns/factory-pattern # Factory pattern implementation
-
-# devops/ - Infrastructure & deployment
-ph use devops/dockerfile        # Production-ready Dockerfiles
-ph use devops/ci-pipeline       # CI/CD pipeline configuration
-ph use devops/kubernetes        # K8s deployment manifests
-
-# claude-commands/ - Imported from Claude
-ph use claude-commands/chain    # Command chaining workflows
-ph use claude-commands/workflow-manager # Workflow automation
-
-# 10x/ - Advanced productivity
-ph use 10x/afk-task "Build auth" # Claude AFK workflows
-ph use 10x/spec-driven          # Spec-driven development
-ph use 10x/fix-tests            # Test fixing assistant
-
-# workflow/ - Complex processes
-ph use workflow/analyze         # Code analysis
-ph use workflow/design          # System design
-ph use workflow/implement       # Implementation guide
-
-# variables/ - Dynamic templates
-ph use variables/standup        # Daily standup
-ph use variables/sprint-planning # Sprint planning
+# 10x/ - Advanced productivity workflows
+ph use 10x/afk-task             # Long-running autonomous task for calmhive
+ph use 10x/fix-tests            # Systematically fix all failing tests
+ph use 10x/refactor             # Refactor code for clarity and performance
 ```
 
 ### Create Your Own Banks
@@ -717,7 +688,7 @@ ph bank install @user/team    # Install from registry
 # Developer workflows
 git diff --staged | ph use essentials/commit | llm
 cat error.log | ph use essentials/debug-error | claude
-git diff main | ph use essentials/code-review | llm > review.md
+git diff main | ph use essentials/review | llm > review.md
 
 # Professional communication
 ph use professional/email-reply "Thanks for your proposal..." | llm
@@ -800,7 +771,7 @@ Design a REST API with these requirements:
 
 ## Why PromptHive?
 
-1. **Speed**: 80ms operations are addictive (GitHub: 30+ seconds)
+1. **Speed**: 15ms operations are addictive (GitHub: 30+ seconds)
 2. **Simple**: Just like `ls` and `cat` - no learning curve  
 3. **Universal**: Works with ALL AI tools, not locked to one
 4. **Offline**: Your prompts work without internet
@@ -811,7 +782,7 @@ Design a REST API with these requirements:
 "You could just use FTP!" they said about Dropbox. But UX is the product.
 "You could just use text files!" they'll say about PromptHive. But speed is the product.
 
-**80ms vs 30 seconds. Every time. That's the difference.**
+**15ms vs 30 seconds. Every time. That's the difference.**
 
 ## The Vision
 
@@ -833,7 +804,7 @@ In one year:
 - ✅ **Cross-platform** - Works on macOS, Linux, Windows
 - ✅ **Prompt composition** - Chain prompts for complex workflows
 - ✅ **Magic link authentication** - Secure login for registry sync
-- ✅ **Performance guarantee** - All operations under 80ms
+- ✅ **Performance guarantee** - All operations under 15ms
 
 ### Advanced Features (All Included - Free & Open Source)
 - ✅ **Registry sync** - Cloud backup and device sync
@@ -886,29 +857,40 @@ ph completion bash > ~/.bash_completion.d/prompthive
 source ~/.bashrc
 ```
 
-## 🐝 Part of the CalmHive Ecosystem
+## 🤝 The Complete Terminal AI Stack
 
-PromptHive works beautifully with [CalmHive CLI](https://calmhive.com) - an open-source wrapper for Claude CLI that adds background processing, voice control, and smart defaults.
+**PromptHive + CalmHive = Ultimate AI Development Workflow**
+
+PromptHive handles instant prompt access (8ms), while [CalmHive](https://calmhive.com) handles background processing, voice control, and smart execution management.
 
 ```bash
-# Use PromptHive with CalmHive for ultimate productivity
-calmhive afk "$(ph use essentials/refactor)" --iterations 20
-calmhive voice "$(ph use essentials/debug)"
+# Install the complete stack
+cargo install prompthive
+npm install -g @calmhive/calmhive-cli
+
+# Use together for powerful workflows
+calmhive afk "$(ph use essentials/refactor)" --iterations 20  # Background processing
+calmhive voice "$(ph use essentials/debug)"                  # Voice control
+ph use essentials/commit | calmhive process --smart-retry    # Smart execution
 ```
 
-Check out [calmhive.com](https://calmhive.com) for enhanced Claude CLI workflows!
+**Perfect Division of Labor:**
+- **PromptHive**: Instant prompt management, universal AI tool compatibility
+- **CalmHive**: Background processing, usage limit handling, voice control
+
+Learn more: [prompthive.sh](https://prompthive.sh) | [calmhive.com](https://calmhive.com)
 
 ## Performance
 
-PromptHive is engineered for sub-80ms performance across all operations. Built with Rust for maximum efficiency and reliability, it handles thousands of prompts without slowing down your workflow.
+PromptHive is engineered for sub-15ms performance across all operations. Built with Rust for maximum efficiency and reliability, it handles thousands of prompts without slowing down your workflow.
 
-**Tested on version 0.2.2**: All core operations (new, use, show, edit, ls, find) complete in under 80ms on modern hardware.
+**Tested on version 0.2.6**: All core operations (new, use, show, edit, ls, find) complete in under 15ms on modern hardware.
 
 ## Join the Community 🐝
 
 ### 🌟 **100% Open Source & Free**
 - ✅ Unlimited local prompts
-- ✅ Lightning-fast performance (<80ms)
+- ✅ Lightning-fast performance (<15ms)
 - ✅ Compose & chain prompts
 - ✅ Cross-platform support
 - ✅ Text cleaning & formatting
@@ -932,6 +914,13 @@ PromptHive is engineered for sub-80ms performance across all operations. Built w
 
 Visit our [GitHub repository](https://github.com/joryeugene/prompthive) to get involved!
 
+## 📚 Resources & Links
+
+- **[PromptHive.sh](https://prompthive.sh/)** - Official website with documentation and installation guides
+- **[CalmHive.com](https://calmhive.com/)** - Perfect companion for background AI processing and voice control
+- **[GitHub Repository](https://github.com/joryeugene/prompthive)** - Source code, issues, and contributions
+- **[Crates.io Package](https://crates.io/crates/prompthive)** - Rust package with version history
+- **[Blog](http://jorypestorious.com/blog/)** - Terminal velocity philosophy and AI development insights
 
 ---
 

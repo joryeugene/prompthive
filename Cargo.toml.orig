@@ -1,9 +1,9 @@
 [package]
 name = "prompthive"
-version = "0.2.2"
+version = "0.2.6"
 edition = "2021"
 authors = ["Jory Pestorious <jory@pestorious.com>"]
-description = "Open source prompt manager for developers. Terminal-native, sub-80ms operations, works with any AI tool."
+description = "Open source prompt manager for developers. Terminal-native, sub-15ms operations, works with any AI tool."
 license = "MIT"
 homepage = "https://prompthive.sh"
 documentation = "https://prompthive.sh"

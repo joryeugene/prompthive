@@ -1,290 +1,160 @@
-# Contributing to PromptHive
+# Contributing to PromptHive 🐝
 
-First off, thank you for considering contributing to PromptHive! It's people like you that make PromptHive such a great tool for the developer community.
+Thank you for your interest in contributing to PromptHive! We welcome contributions from the community and are excited to work with you.
 
 ## Code of Conduct
 
-This project and everyone participating in it is governed by our Code of Conduct. By participating, you are expected to uphold this code. Please be kind, constructive, and professional in all interactions.
+By participating in this project, you agree to abide by our Code of Conduct. Please be respectful and constructive in all interactions.
 
-## How Can I Contribute?
+## Getting Started
 
-### 🐛 Reporting Bugs
+1. **Fork the repository** (when available on GitHub)
+2. **Clone your fork**:
+   ```bash
+   git clone https://github.com/YOUR_USERNAME/prompthive
+   cd prompthive
+   ```
+3. **Set up development environment**:
+   ```bash
+   # Install Rust (if not already installed)
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   
+   # Build the project
+   cargo build --release
+   
+   # Run tests
+   cargo test --release
+   ```
 
-Before creating bug reports, please check existing issues as you might find out that you don't need to create one. When you are creating a bug report, please include as many details as possible:
+## Ways to Contribute
 
-**Bug Report Template:**
-```markdown
-**Describe the bug**
-A clear and concise description of what the bug is.
+### 1. Report Bugs
+- Check if the issue already exists
+- Create a clear, minimal reproduction
+- Include system information (OS, Rust version)
+- Describe expected vs actual behavior
 
-**To Reproduce**
-Steps to reproduce the behavior:
-1. Run command '...'
-2. See error
+### 2. Request Features
+- Explain the use case
+- Provide examples of how it would work
+- Consider if it aligns with PromptHive's philosophy
 
-**Expected behavior**
-What you expected to happen.
+### 3. Submit Prompts
+- Create high-quality, reusable prompts
+- Test them thoroughly
+- Submit to the community registry
+- Follow the prompt format guidelines
 
-**Actual behavior**
-What actually happened.
+### 4. Improve Documentation
+- Fix typos and clarify explanations
+- Add examples and use cases
+- Translate documentation
+- Create tutorials and guides
 
-**Environment:**
-- OS: [e.g. macOS 14.0]
-- PromptHive version: [run `ph --version`]
-- Rust version: [run `rustc --version`]
+### 5. Contribute Code
+- Follow Rust best practices
+- Maintain sub-80ms performance
+- Add tests for new features
+- Update documentation as needed
 
-**Additional context**
-Any other context about the problem.
-```
+## Development Guidelines
 
-### 💡 Suggesting Enhancements
+### Performance Standards
+- **All operations must complete in <80ms**
+- Profile performance impact of changes
+- Use `cargo test test_performance` to verify
 
-Enhancement suggestions are tracked as GitHub issues. Before creating enhancement suggestions, please check the existing issues and discussions.
-
-**Enhancement Template:**
-```markdown
-**Is your feature request related to a problem?**
-A clear description of what the problem is.
-
-**Describe the solution you'd like**
-A clear description of what you want to happen.
-
-**Describe alternatives you've considered**
-Any alternative solutions or features you've considered.
-
-**Additional context**
-Any other context or screenshots.
-```
-
-### 🔧 Your First Code Contribution
-
-Unsure where to begin? Look for these tags:
-- `good first issue` - Good for newcomers
-- `help wanted` - Extra attention needed
-- `easy` - Should be simple to implement
-
-### 📝 Pull Requests
-
-1. **Fork the repo** and create your branch from `main`
-2. **Write code** following our style guide
-3. **Add tests** for any new functionality
-4. **Ensure tests pass** with `cargo test`
-5. **Run lints** with `cargo clippy`
-6. **Format code** with `cargo fmt`
-7. **Update docs** if needed
-8. **Submit PR** with clear description
-
-## Development Setup
-
-### Prerequisites
-- Rust 1.70+ (install via [rustup](https://rustup.rs/))
-- Git
-- A terminal emulator
-
-### Local Development
-```bash
-# Clone your fork
-git clone https://github.com/joryeugene/prompthive
-cd prompthive
-
-# Add upstream remote
-git remote add upstream https://github.com/ORIGINAL_OWNER/prompthive
-
-# Install dependencies and build
-cargo build
-
-# Run tests
-cargo test
-
-# Run with debug logging
-RUST_LOG=debug cargo run -- help
-
-# Run specific command
-cargo run -- new test-prompt "This is a test"
-```
-
-### Running Tests
-```bash
-# Run all tests
-cargo test
-
-# Run specific test
-cargo test test_name
-
-# Run tests with output
-cargo test -- --nocapture
-
-# Run integration tests only
-cargo test --test '*'
-
-# Run with coverage (requires cargo-tarpaulin)
-cargo tarpaulin --out Html
-```
-
-## Style Guide
-
-### Rust Code Style
-
-We follow standard Rust conventions:
-- Use `cargo fmt` before committing
-- Follow `cargo clippy` suggestions
+### Code Style
+- Follow standard Rust formatting (`cargo fmt`)
 - Use meaningful variable names
+- Add comments for complex logic
 - Keep functions focused and small
-- Document public APIs
 
-**Example:**
-```rust
-/// Creates a new prompt with the given name and content
-/// 
-/// # Arguments
-/// * `name` - The name of the prompt
-/// * `content` - The prompt content
-/// 
-/// # Returns
-/// * `Result<()>` - Success or error
-pub fn create_prompt(name: &str, content: &str) -> Result<()> {
-    // Implementation
-}
-```
+### Testing
+- Write unit tests for new functions
+- Add integration tests for new commands
+- Ensure all tests pass before submitting
+- Test on multiple platforms if possible
 
 ### Commit Messages
-
 Follow conventional commits:
 ```
-feat: add new variable system
-fix: resolve parsing error in templates
+feat: add new clean command
+fix: resolve clipboard issue on Linux
 docs: update installation instructions
-test: add tests for compose command
-refactor: simplify prompt storage logic
-perf: optimize search performance
+test: add performance benchmarks
+refactor: simplify prompt matching logic
 ```
 
-### Documentation
+## Pull Request Process
 
-- Update README.md for user-facing changes
-- Add inline documentation for public functions
-- Include examples in documentation
-- Keep language clear and concise
+1. **Create a feature branch**:
+   ```bash
+   git checkout -b feature/your-feature-name
+   ```
 
-## Testing
+2. **Make your changes**:
+   - Write clean, documented code
+   - Add/update tests
+   - Update documentation
 
-### Test Categories
+3. **Test thoroughly**:
+   ```bash
+   cargo test --release
+   cargo check
+   cargo clippy
+   ```
 
-1. **Unit Tests** - Test individual functions
-2. **Integration Tests** - Test command workflows
-3. **Performance Tests** - Verify <80ms operations
-4. **Doc Tests** - Ensure examples work
+4. **Submit PR**:
+   - Clear description of changes
+   - Link to related issues
+   - Include examples if applicable
 
-### Writing Tests
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
+## Prompt Contribution Guidelines
 
-    #[test]
-    fn test_prompt_creation() {
-        let result = create_prompt("test", "content");
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_performance() {
-        let start = std::time::Instant::now();
-        let _ = list_prompts();
-        assert!(start.elapsed().as_millis() < 80);
-    }
-}
-```
-
-## Community Prompt Packs
-
-Have an awesome prompt collection? Share it with the community!
-
-### Creating a Prompt Pack
-
-1. **Structure your repository:**
-```
-awesome-prompts-coding/
-├── README.md
-├── backend/
-│   ├── api-design.md
-│   ├── database-schema.md
-│   └── error-handling.md
-├── frontend/
-│   ├── component-design.md
-│   └── state-management.md
-└── testing/
-    ├── unit-tests.md
-    └── integration-tests.md
-```
-
-2. **Add metadata to prompts:**
+### Format
 ```markdown
 ---
-name: api-design
-description: Design REST APIs following best practices
-variables:
-  - resource: The resource name
-  - operations: CRUD operations needed
-tags: [backend, api, rest]
+id: category/prompt-name
+description: Clear, one-line description
+tags: [tag1, tag2]
+author: YourName (optional)
 ---
 
-Design a REST API for {resource} supporting {operations}...
+# Prompt Title
+
+Your prompt content here with {placeholders} for variables.
+Include clear instructions and expected output format.
 ```
 
-3. **Create clear README:**
-```markdown
-# Awesome Coding Prompts
+### Quality Standards
+- Clear, actionable instructions
+- Reusable with placeholders
+- Tested with multiple AI tools
+- Professional tone
+- No sensitive information
 
-A collection of prompts for software development.
+## Community Registry
 
-## Installation
-```bash
-git clone https://github.com/YOUR/awesome-prompts-coding
-ph import ./awesome-prompts-coding
-```
+To submit prompts to the registry:
 
-## Prompts Included
-- `backend/api-design` - REST API design
-- `frontend/component-design` - React component patterns
-...
-```
-
-4. **Submit to awesome-prompthive list** (coming soon)
-
-## Release Process
-
-Releases are automated via GitHub Actions when a tag is pushed:
-
-```bash
-git tag v1.2.3
-git push origin v1.2.3
-```
-
-This will:
-1. Run all tests
-2. Build binaries for all platforms
-3. Create GitHub release
-4. Publish to crates.io
-
-## Recognition
-
-Contributors are recognized in:
-- The README.md contributors section
-- Release notes
-- The `CONTRIBUTORS` file
+1. Create your prompt following the format above
+2. Test it thoroughly with different inputs
+3. Place in appropriate category
+4. Submit via pull request or `ph publish`
 
 ## Questions?
 
-Feel free to:
-- Open a discussion for general questions
-- Ask in issues for specific problems
-- Reach out to maintainers
+- Check existing documentation
+- Search closed issues
+- Ask in discussions
+- Join our community chat
 
-## Financial Support
+## Recognition
 
-If you want to support the project financially:
-- GitHub Sponsors (coming soon)
-- Buy the maintainers a coffee ☕
+Contributors will be recognized in:
+- Release notes
+- Contributors file
+- Community highlights
 
-Thank you for making PromptHive better! 🐝
+Thank you for helping make PromptHive better! 🐝
