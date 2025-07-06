@@ -39,6 +39,7 @@ autobenches = false
 description = "Open source prompt manager for developers. Terminal-native, sub-15ms operations, works with any AI tool."
 homepage = "https://prompthive.sh"
 documentation = "https://prompthive.sh"
+repository = "https://github.com/joryeugene/prompthive"
 readme = "README.md"
 keywords = [
     "ai",
