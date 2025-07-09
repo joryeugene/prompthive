@@ -1,0 +1,32 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+/dist/
+*.log
+
+# Node modules (for Cloudflare Workers)
+node_modules/
+**/node_modules/
+
+# Environment files
+.env
+.env.local
+*.env
+
+# Cloudflare Workers
+.dev.vars
+wrangler.toml.local

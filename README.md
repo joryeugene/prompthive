@@ -14,7 +14,6 @@
 ```bash
 # Install (Latest: v0.2.8)
 cargo install prompthive
-# OR: curl -sSL https://prompthive.sh/install.sh | bash
 
 # Multiple Workflows - Choose Your Style
 
@@ -68,16 +67,7 @@ cargo install prompthive
 ph --version
 ```
 
-### Quick Install Script
-```bash
-# Automatic installation with platform detection
-curl -sSL https://prompthive.sh/install.sh | bash
-
-# Verify installation
-ph --version
-```
-
-**Current Status**: Version 0.2.8 is available on crates.io. The install script automatically downloads pre-built binaries for your platform.
+**Current Status**: Version 0.2.8 is available on crates.io and installs instantly via cargo.
 
 ### Shell Completions
 
