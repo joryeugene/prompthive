@@ -12,7 +12,7 @@
 ## TL;DR
 
 ```bash
-# Install (Latest: v0.2.6)
+# Install (Latest: v0.2.8)
 cargo install prompthive
 # OR: curl -sSL https://prompthive.sh/install.sh | bash
 
@@ -32,7 +32,7 @@ git diff main...HEAD | ph use essentials/review | claude -p | gh pr create --bod
 
 **Why?** Because copy-pasting from ChatGPT history takes 30+ seconds. PromptHive operations average 8ms.
 
-**Current Version**: 0.2.6 - Open source with community registry, instant authentication, team collaboration, and prompt sharing. All features included, no paid tiers.
+**Current Version**: 0.2.8 - Open source with community registry, instant authentication, team collaboration, and prompt sharing. All features included, no paid tiers.
 
 > **🚀 Philosophy**: [Terminal-First Development](http://jorypestorious.com/blog/terminal-velocity/) | [Spec-Driven AI Engineering](http://jorypestorious.com/blog/ai-engineer-spec/)
 > **📁 Complete Guide**: [prompthive.sh](https://prompthive.sh) | **🤖 Background AI**: [calmhive.com](https://calmhive.com)
@@ -77,7 +77,7 @@ curl -sSL https://prompthive.sh/install.sh | bash
 ph --version
 ```
 
-**Current Status**: Version 0.2.6 is available on crates.io. The install script automatically downloads pre-built binaries for your platform.
+**Current Status**: Version 0.2.8 is available on crates.io. The install script automatically downloads pre-built binaries for your platform.
 
 ### Shell Completions
 
@@ -184,7 +184,7 @@ ph f api     # Finds all API-related prompts instantly
 
 This isn't about saving 30 seconds once. It's about saving 5 minutes, 20 times per day, while maintaining flow state.
 
-## Commands (v0.2.6)
+## Commands (v0.2.8)
 
 ```bash
 ph use <name>         # Use a prompt (u) - auto-clipboard, save, append, file
@@ -894,7 +894,7 @@ Learn more: [prompthive.sh](https://prompthive.sh) | [calmhive.com](https://calm
 
 PromptHive is engineered for sub-15ms performance across all operations. Built with Rust for maximum efficiency and reliability, it handles thousands of prompts without slowing down your workflow.
 
-**Tested on version 0.2.6**: All core operations (new, use, show, edit, ls, find) complete in under 15ms on modern hardware.
+**Tested on version 0.2.8**: All core operations (new, use, show, edit, ls, find) complete in under 15ms on modern hardware.
 
 ## Join the Community 🐝
 
