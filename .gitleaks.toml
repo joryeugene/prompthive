@@ -1,0 +1,24 @@
+title = "Prompthive secret scan"
+
+[extend]
+useDefault = true
+
+# Only these exact synthetic scanner-test lines are exempt. They originated in
+# commit 4e4c877f9c844711a54400ca7d03d7ff0215838e (lines 537 and 573).
+# All other matches, paths, and detection rules remain enabled.
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = "Exact historical API-key scanner unit-test string"
+condition = "AND"
+paths = ['''^src/security\.rs$''']
+regexTarget = "line"
+regexes = ['''^\s*let content = "API_KEY=sk-1234567890abcdef";$''']
+
+[[rules.allowlists]]
+description = "Exact historical file-scanner unit-test string"
+condition = "AND"
+paths = ['''^src/security\.rs$''']
+regexTarget = "line"
+regexes = ['''^\s*writeln!\(file, "API_KEY=secret123456789abcdef"\)\.unwrap\(\);$''']

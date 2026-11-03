@@ -1,53 +1,25 @@
-use anyhow::Result;
+use crate::Storage;
+use anyhow::{bail, Result};
 use std::io::Write;
-use tempfile::NamedTempFile;
 
-use crate::commands::configuration::load_editor_config;
-
-/// Open content in $EDITOR and return edited content
+/// Edit a staged document. An unsuccessful editor never changes the store.
 pub fn edit_content(content: &str) -> Result<String> {
-    // Create a temporary file
-    let mut temp_file = NamedTempFile::new()?;
-    temp_file.write_all(content.as_bytes())?;
-    temp_file.flush()?;
-
-    // Get editor configuration
-    let editor_config = load_editor_config().unwrap_or_else(|_| {
-        // Fallback to environment or defaults
-        use std::env;
-        let command = env::var("EDITOR").unwrap_or_else(|_| {
-            if cfg!(windows) {
-                "notepad".to_string()
-            } else {
-                "vi".to_string()
-            }
-        });
-        crate::commands::configuration::EditorConfig {
-            command,
-            args: vec![],
-            preset: None,
-        }
-    });
-
-    // Build command with args
-    let mut cmd = std::process::Command::new(&editor_config.command);
-    for arg in &editor_config.args {
-        cmd.arg(arg);
-    }
-    cmd.arg(temp_file.path());
-
-    // Open editor
-    let status = cmd.status()?;
-
+    let mut staged = tempfile::Builder::new()
+        .prefix("ph-edit-")
+        .suffix(".md")
+        .tempfile()?;
+    staged.write_all(content.as_bytes())?;
+    staged.flush()?;
+    let status =
+        crate::commands::configuration::get_editor_command_for_file(staged.path())?.status()?;
     if !status.success() {
-        anyhow::bail!(
-            "Editor '{}' exited with non-zero status",
-            editor_config.command
-        );
+        bail!("editor exited unsuccessfully; the stored prompt was unchanged");
     }
-
-    // Read edited content
-    let edited = std::fs::read_to_string(temp_file.path())?;
-
-    Ok(edited)
+    Ok(std::fs::read_to_string(staged.path())?)
+}
+pub fn edit_prompt(storage: &Storage, name: &str) -> Result<()> {
+    let original = storage.read_raw(name)?;
+    let text = std::str::from_utf8(&original)?;
+    let edited = edit_content(text)?;
+    storage.replace_raw_if_unchanged(name, edited.as_bytes(), &original)
 }

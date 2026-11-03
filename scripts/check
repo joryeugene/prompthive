@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Fetch dependencies first (cargo fetch --locked), then run the core offline.
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$repo_root"
+
+bash scripts/test-release-gate
+cargo fmt --all --check
+cargo test --locked --offline
+cargo test --locked --offline --no-default-features
+cargo clippy --locked --offline --all-targets -- -D warnings
+cargo clippy --locked --offline --all-targets --no-default-features -- -D warnings
+cargo build --locked --offline --bin ph
+
+candidate_dir=${CARGO_TARGET_DIR:-"$repo_root/target"}
+if [[ "$candidate_dir" != /* && ! "$candidate_dir" =~ ^[[:alpha:]]: ]]; then
+  candidate_dir="$repo_root/$candidate_dir"
+fi
+candidate="$candidate_dir/debug/ph"
+if [[ ! -f "$candidate" && -f "$candidate.exe" ]]; then
+  candidate="$candidate.exe"
+fi
+PROMPTHIVE_BIN="$candidate" bash examples/creative_patterns.sh
