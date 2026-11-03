@@ -353,92 +353,104 @@ fn inline_text(text: &str) -> String {
 
 /// Stream only the requested page. Control escaping never materializes an expanded document.
 fn preview_window(text: &str, width: u16, skip: usize, count: usize) -> (Vec<Line<'static>>, bool) {
-    let mut lines = Vec::new();
-    let mut row = 0;
-    let mut line = String::new();
-    let mut used = 0;
+    let page = preview_page(text, width, skip, count, false);
+    (page.lines, page.row > skip.saturating_add(count))
+}
+
+pub(super) fn counted_preview(
+    text: &str,
+    width: u16,
+    skip: usize,
+    count: usize,
+) -> (Vec<Line<'static>>, usize) {
+    let page = preview_page(text, width, skip, count, true);
+    (page.lines, page.row)
+}
+
+pub(super) fn preview_lines(
+    text: &str,
+    width: u16,
+    skip: usize,
+    count: usize,
+) -> Vec<Line<'static>> {
+    preview_page(text, width, skip, count, false).lines
+}
+
+struct Page {
+    width: usize,
+    skip: usize,
+    count: usize,
+    scan_all: bool,
+    row: usize,
+    used: usize,
+    has_token: bool,
+    line: String,
+    lines: Vec<Line<'static>>,
+}
+impl Page {
+    fn flush(&mut self) -> bool {
+        if self.row >= self.skip && self.lines.len() < self.count {
+            self.lines.push(Line::from(std::mem::take(&mut self.line)));
+        } else {
+            self.line.clear();
+        }
+        self.row += 1;
+        self.used = 0;
+        self.has_token = false;
+        !self.scan_all && self.row > self.skip.saturating_add(self.count)
+    }
+    fn push(&mut self, symbol: &str) -> bool {
+        let columns = Span::raw(symbol).width();
+        if self.has_token && self.used + columns > self.width && self.flush() {
+            return true;
+        }
+        if self.row >= self.skip && self.lines.len() < self.count {
+            self.line.push_str(symbol);
+        }
+        self.used += columns;
+        self.has_token = true;
+        false
+    }
+}
+
+fn preview_page(text: &str, width: u16, skip: usize, count: usize, scan_all: bool) -> Page {
+    let mut page = Page {
+        width: usize::from(width),
+        skip,
+        count,
+        scan_all,
+        row: 0,
+        used: 0,
+        has_token: false,
+        line: String::new(),
+        lines: Vec::new(),
+    };
     for logical in text.split('\n') {
-        // Span deliberately filters control graphemes; separate them first so
-        // the preview visibly represents every byte rather than dropping tabs/CR.
+        // Span filters control graphemes; separate them first so tabs and CR
+        // are represented visibly rather than being silently dropped.
         for segment in logical.split_inclusive(char::is_control) {
             let control = segment.chars().next_back().filter(|c| c.is_control());
             let normal = &segment[..segment.len() - control.map_or(0, char::len_utf8)];
             let span = Span::raw(normal);
             for grapheme in span.styled_graphemes(Style::default()) {
-                if preview_token(
-                    grapheme.symbol,
-                    width,
-                    skip,
-                    count,
-                    &mut lines,
-                    &mut row,
-                    &mut line,
-                    &mut used,
-                ) {
-                    return (lines, true);
+                if page.push(grapheme.symbol) {
+                    return page;
                 }
             }
             if let Some(control) = control {
                 let escaped = inline_text(&control.to_string());
                 for character in escaped.chars() {
-                    if preview_token(
-                        &character.to_string(),
-                        width,
-                        skip,
-                        count,
-                        &mut lines,
-                        &mut row,
-                        &mut line,
-                        &mut used,
-                    ) {
-                        return (lines, true);
+                    if page.push(&character.to_string()) {
+                        return page;
                     }
                 }
             }
         }
-        if row >= skip {
-            lines.push(Line::from(std::mem::take(&mut line)));
-        } else {
-            line.clear();
-        }
-        row += 1;
-        used = 0;
-        if lines.len() > count {
-            lines.pop();
-            return (lines, true);
+        if page.flush() {
+            return page;
         }
     }
-    (lines, false)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn preview_token(
-    symbol: &str,
-    width: u16,
-    skip: usize,
-    count: usize,
-    lines: &mut Vec<Line<'static>>,
-    row: &mut usize,
-    line: &mut String,
-    used: &mut usize,
-) -> bool {
-    let columns = Span::raw(symbol).width();
-    if *used + columns > width as usize && !line.is_empty() {
-        if *row >= skip {
-            lines.push(Line::from(std::mem::take(line)));
-        } else {
-            line.clear();
-        }
-        *row += 1;
-        *used = 0;
-        if lines.len() > count {
-            lines.pop();
-            return true;
-        }
-    }
-    line.push_str(symbol);
-    *used += columns;
-    false
+    page
 }
 
 pub(super) fn complete(
@@ -589,6 +601,21 @@ mod tests {
                 .map(|line| line.to_string().len())
                 .sum::<usize>()
                 <= 120
+        );
+        assert!(!page.iter().any(|line| line.to_string().contains('\u{1b}')));
+    }
+
+    #[test]
+    fn counted_picker_preview_tracks_all_rows_but_keeps_only_a_page() {
+        let source = "\u{1b}".repeat(100_000);
+        let (page, total) = counted_preview(&source, 80, 2, 3);
+        assert_eq!(total, 10_000);
+        assert_eq!(page.len(), 3);
+        assert_eq!(
+            page.iter()
+                .map(|line| line.to_string().len())
+                .sum::<usize>(),
+            240
         );
         assert!(!page.iter().any(|line| line.to_string().contains('\u{1b}')));
     }

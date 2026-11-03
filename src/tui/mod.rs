@@ -374,6 +374,7 @@ struct PickerState {
     preview_scroll: usize,
     max_scroll: usize,
     page_height: usize,
+    preview_layout: Option<(usize, u16, usize)>,
     identity_visible: bool,
     message: Option<String>,
 }
@@ -389,6 +390,7 @@ impl PickerState {
             preview_scroll: 0,
             max_scroll: 0,
             page_height: 1,
+            preview_layout: None,
             identity_visible: false,
             message: None,
         };
@@ -609,10 +611,15 @@ impl PickerState {
             return;
         }
 
-        let selected = match self.selected() {
-            Some(entry) => entry.clone(),
-            None => return,
+        let Some(index) = self
+            .selection
+            .selected()
+            .and_then(|row| self.filtered.get(row))
+            .copied()
+        else {
+            return;
         };
+        let selected = &self.entries[index];
         let command = if self.intent == PickerIntent::Edit {
             format!("Edit with: ph e {}", shell_selector(&selected.prompt.name))
         } else {
@@ -680,20 +687,37 @@ impl PickerState {
                 .saturating_sub(label_area.y + 1),
             ..content
         };
-        let preview = safe_text(selected.error.as_deref().unwrap_or(&selected.body));
-        let lines = wrap_text(&preview, body_area.width);
+        let preview = selected.error.as_deref().unwrap_or(&selected.body);
         self.page_height = (body_area.height as usize).max(1);
-        self.max_scroll = lines.len().saturating_sub(body_area.height as usize);
-        self.preview_scroll = self.preview_scroll.min(self.max_scroll);
-        frame.render_widget(
-            Paragraph::new(
-                lines
-                    .into_iter()
-                    .skip(self.preview_scroll)
-                    .collect::<Vec<_>>(),
-            ),
-            body_area,
-        );
+        let mut lines = None;
+        let total = match self.preview_layout {
+            Some((cached_index, width, total))
+                if cached_index == index && width == body_area.width =>
+            {
+                total
+            }
+            _ => {
+                let (page, total) = guided::counted_preview(
+                    preview,
+                    body_area.width,
+                    self.preview_scroll,
+                    self.page_height,
+                );
+                lines = Some(page);
+                self.preview_layout = Some((index, body_area.width, total));
+                total
+            }
+        };
+        self.max_scroll = total.saturating_sub(body_area.height as usize);
+        let scroll = self.preview_scroll.min(self.max_scroll);
+        if scroll != self.preview_scroll {
+            lines = None;
+        }
+        self.preview_scroll = scroll;
+        let lines = lines.unwrap_or_else(|| {
+            guided::preview_lines(preview, body_area.width, scroll, self.page_height)
+        });
+        frame.render_widget(Paragraph::new(lines), body_area);
         if let Some(message) = &self.message {
             frame.render_widget(
                 Paragraph::new(tail_to_width(message, footer.width))
