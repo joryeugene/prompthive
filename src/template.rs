@@ -1,480 +1,466 @@
-//! Template processing and variable substitution
-//!
-//! This module provides template processing capabilities with support for multiple
-//! variable types including system variables, environment variables, context variables,
-//! and custom user-defined variables.
+//! Single-pass template rendering. Inserted values are text, never new template source.
 
-use anyhow::{Context, Result};
-use std::collections::HashMap;
+use anyhow::{bail, Context, Result};
+use chrono::{DateTime, Local, Utc};
+use std::collections::{BTreeMap, HashMap};
 use std::env;
-use std::process::Command;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
-/// Template variable processor for PromptHive
-///
-/// Supports multiple variable types:
-/// - System variables (date, time, user info)
-/// - Context variables (clipboard, current directory)
-/// - Environment variables
-/// - Custom user-defined variables
+pub type Declarations = BTreeMap<String, Option<String>>;
+pub type Variables = BTreeMap<String, String>;
+
+const INPUT_SLOTS: &[&str] = &["input", "INPUT", "content", "CONTENT"];
+const SYSTEM_SLOTS: &[&str] = &[
+    "date",
+    "time",
+    "datetime",
+    "timestamp",
+    "iso_date",
+    "user",
+    "hostname",
+    "uuid",
+    "cwd",
+    "pwd",
+    "git_branch",
+    "git_status",
+    "git_hash",
+];
+
+pub fn is_reserved_name(name: &str) -> bool {
+    INPUT_SLOTS.contains(&name) || SYSTEM_SLOTS.contains(&name) || name.starts_with("env:")
+}
+
+pub fn validate_declarations(declared: &Declarations) -> Result<()> {
+    for name in declared.keys() {
+        let mut chars = name.chars();
+        if !matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+            || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            bail!("invalid variable name {name:?}; use an ASCII identifier");
+        }
+        if is_reserved_name(name) {
+            bail!("variable {name:?} is reserved");
+        }
+    }
+    Ok(())
+}
+
+/// Programmatic defaults remain explicit; no configuration file is loaded here.
+#[derive(Default)]
 pub struct TemplateProcessor {
     custom_variables: HashMap<String, String>,
 }
 
 impl TemplateProcessor {
-    /// Create a new template processor instance
     pub fn new() -> Self {
-        Self {
-            custom_variables: HashMap::new(),
-        }
+        Self::default()
     }
 
-    /// Process a template string, replacing all variables with their values
-    ///
-    /// Supports various variable types:
-    /// - `{input}` - The input text provided to the template
-    /// - `{date}` - Current date in YYYY-MM-DD format
-    /// - `{time}` - Current time in HH:MM:SS format
-    /// - `{user}` - Current username
-    /// - `{hostname}` - System hostname
-    /// - `{cwd}` - Current working directory
-    /// - `{clipboard}` - Current clipboard contents
-    /// - `{env:VAR_NAME}` - Environment variable value
-    /// - Custom variables set via `set_variable`
-    ///
-    /// # Arguments
-    ///
-    /// * `template` - The template string containing variables to substitute
-    /// * `input` - The input text to substitute for `{input}` variables
-    ///
-    /// # Returns
-    ///
-    /// The processed template with all variables substituted
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if variable substitution fails or if required commands
-    /// for system variables are not available.
     pub fn process(&self, template: &str, input: &str) -> Result<String> {
-        // Early return if no variables to process
-        if !template.contains('{') {
-            if input.is_empty() {
-                return Ok(template.to_string());
-            } else {
-                // Legacy behavior: append input if no placeholders
-                return Ok(format!("{}\n\n{}", template, input));
+        let declared = self
+            .custom_variables
+            .iter()
+            .map(|(name, value)| (name.clone(), Some(value.clone())))
+            .collect();
+        self.process_with_variables(template, input, &declared, &Variables::new())
+    }
+
+    pub fn process_with_variables(
+        &self,
+        template: &str,
+        input: &str,
+        declared: &Declarations,
+        supplied: &Variables,
+    ) -> Result<String> {
+        validate_declarations(declared)?;
+        for name in supplied.keys() {
+            if !declared.contains_key(name) {
+                bail!("variable {name:?} is not declared by this template");
             }
         }
-
-        let mut result = template.to_string();
-
-        // Process in order of precedence:
-        // 1. Input variables (legacy compatibility)
-        if !input.is_empty()
-            && (result.contains("{input}")
-                || result.contains("{INPUT}")
-                || result.contains("{content}")
-                || result.contains("{CONTENT}"))
-        {
-            result = self.process_input_variables(&result, input);
-        }
-
-        // 2. System variables - only if template contains them
-        if result.contains("{date}")
-            || result.contains("{time}")
-            || result.contains("{datetime}")
-            || result.contains("{timestamp}")
-            || result.contains("{iso_date}")
-            || result.contains("{user}")
-            || result.contains("{hostname}")
-            || result.contains("{uuid}")
-        {
-            result = self.process_system_variables(&result)?;
-        }
-
-        // 3. Context variables - only if template contains them
-        if result.contains("{cwd}") || result.contains("{pwd}") || result.contains("{git_") {
-            result = self.process_context_variables(&result)?;
-        }
-
-        // 4. Environment variables - only if template contains them
-        if result.contains("{env:") {
-            result = self.process_environment_variables(&result)?;
-        }
-
-        // 5. Custom variables - only if we have any and template might contain them
-        if !self.custom_variables.is_empty() {
-            result = self.process_custom_variables(&result);
-        }
-
-        Ok(result)
+        let mut context = RenderContext::capture();
+        Ok(PreparedTemplate::compile(template, declared, supplied, &mut context)?.render(input))
     }
 
-    /// Add or update a custom variable
     pub fn set_custom_variable(&mut self, name: &str, value: &str) {
-        self.custom_variables
-            .insert(name.to_string(), value.to_string());
+        self.custom_variables.insert(name.into(), value.into());
     }
 
-    /// Remove a custom variable
     pub fn remove_custom_variable(&mut self, name: &str) {
         self.custom_variables.remove(name);
     }
 
-    /// Get all custom variables
     pub fn get_custom_variables(&self) -> &HashMap<String, String> {
         &self.custom_variables
     }
+}
 
-    /// Process legacy input variables for backward compatibility
-    fn process_input_variables(&self, template: &str, input: &str) -> String {
-        let mut result = template.to_string();
+/// One instance is shared by every source in an invocation.
+pub(crate) struct RenderContext {
+    now: DateTime<Utc>,
+    directory: Option<PathBuf>,
+    captured: Variables,
+}
 
-        // Replace common placeholders (case-insensitive for compatibility)
-        result = result.replace("{input}", input);
-        result = result.replace("{INPUT}", input);
-        result = result.replace("{content}", input);
-        result = result.replace("{CONTENT}", input);
-
-        result
-    }
-
-    /// Process system variables like {date}, {time}, {user}, etc.
-    fn process_system_variables(&self, template: &str) -> Result<String> {
-        let mut result = template.to_string();
-
-        // Date and time variables
-        let now = chrono::Utc::now();
-        let local = chrono::Local::now();
-
-        result = result.replace("{date}", &now.format("%Y-%m-%d").to_string());
-        result = result.replace("{time}", &local.format("%H:%M:%S").to_string());
-        result = result.replace("{datetime}", &local.format("%Y-%m-%d %H:%M:%S").to_string());
-        result = result.replace("{timestamp}", &now.timestamp().to_string());
-        result = result.replace("{iso_date}", &now.to_rfc3339());
-
-        // User and system variables
-        result = result.replace(
-            "{user}",
-            &env::var("USER").unwrap_or_else(|_| "unknown".to_string()),
-        );
-        result = result.replace("{hostname}", &gethostname::gethostname().to_string_lossy());
-
-        // Process UUID variable
-        result = result.replace("{uuid}", &uuid::Uuid::new_v4().to_string());
-
-        Ok(result)
-    }
-
-    /// Process context variables like {cwd}, {git_branch}, etc.
-    fn process_context_variables(&self, template: &str) -> Result<String> {
-        let mut result = template.to_string();
-
-        // Current working directory
-        if let Ok(cwd) = env::current_dir() {
-            result = result.replace("{cwd}", &cwd.to_string_lossy());
-            if let Some(dir_name) = cwd.file_name() {
-                result = result.replace("{pwd}", &dir_name.to_string_lossy());
-            }
+impl RenderContext {
+    pub(crate) fn capture() -> Self {
+        Self {
+            now: Utc::now(),
+            directory: env::current_dir().ok(),
+            captured: Variables::new(),
         }
-
-        // Git context variables
-        result = self.process_git_variables(&result)?;
-
-        Ok(result)
     }
 
-    /// Process git-related variables
-    fn process_git_variables(&self, template: &str) -> Result<String> {
-        let mut result = template.to_string();
-
-        // Get git branch
-        if let Ok(output) = Command::new("git")
-            .args(["rev-parse", "--abbrev-ref", "HEAD"])
-            .output()
-        {
-            if output.status.success() {
-                let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                result = result.replace("{git_branch}", &branch);
-            } else {
-                result = result.replace("{git_branch}", "");
-            }
-        } else {
-            result = result.replace("{git_branch}", "");
+    fn value(&mut self, token: &str) -> Result<String> {
+        if let Some(value) = self.captured.get(token) {
+            return Ok(value.clone());
         }
-
-        // Get git status (clean/dirty)
-        if let Ok(output) = Command::new("git").args(["status", "--porcelain"]).output() {
-            if output.status.success() {
-                let status = if output.stdout.is_empty() {
-                    "clean"
+        let local = self.now.with_timezone(&Local);
+        let value = match token {
+            "date" => self.now.format("%Y-%m-%d").to_string(),
+            "time" => local.format("%H:%M:%S").to_string(),
+            "datetime" => local.format("%Y-%m-%d %H:%M:%S").to_string(),
+            "timestamp" => self.now.timestamp().to_string(),
+            "iso_date" => self.now.to_rfc3339(),
+            "user" => env::var("USER")
+                .or_else(|_| env::var("USERNAME"))
+                .context("cannot determine the current user")?,
+            "hostname" => gethostname::gethostname().to_string_lossy().into_owned(),
+            "uuid" => uuid::Uuid::new_v4().to_string(),
+            "cwd" | "pwd" => {
+                let directory = self
+                    .directory
+                    .as_ref()
+                    .context("cannot determine the current directory")?;
+                let part = if token == "pwd" {
+                    directory.file_name().unwrap_or(directory.as_os_str())
                 } else {
-                    "dirty"
+                    directory.as_os_str()
                 };
-                result = result.replace("{git_status}", status);
-            } else {
-                result = result.replace("{git_status}", "");
+                part.to_string_lossy().into_owned()
             }
-        } else {
-            result = result.replace("{git_status}", "");
-        }
-
-        // Get git commit hash
-        if let Ok(output) = Command::new("git")
-            .args(["rev-parse", "--short", "HEAD"])
-            .output()
-        {
-            if output.status.success() {
-                let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                result = result.replace("{git_hash}", &hash);
-            } else {
-                result = result.replace("{git_hash}", "");
+            "git_branch" => self.git(&["rev-parse", "--abbrev-ref", "HEAD"], token)?,
+            "git_hash" => self.git(&["rev-parse", "--short", "HEAD"], token)?,
+            "git_status" => {
+                if self.git(&["status", "--porcelain"], token)?.is_empty() {
+                    "clean".into()
+                } else {
+                    "dirty".into()
+                }
             }
-        } else {
-            result = result.replace("{git_hash}", "");
-        }
-
-        Ok(result)
-    }
-
-    /// Process environment variables in format {env:VAR_NAME}
-    fn process_environment_variables(&self, template: &str) -> Result<String> {
-        let mut result = template.to_string();
-
-        // Find all {env:VAR_NAME} patterns
-        let env_regex = regex::Regex::new(r"\{env:([^}]+)\}").unwrap();
-
-        // Process each environment variable
-        for caps in env_regex.captures_iter(template) {
-            let full_match = &caps[0];
-            let var_name = &caps[1];
-
-            let value = env::var(var_name).unwrap_or_else(|_| {
-                eprintln!("Warning: Environment variable '{}' not found", var_name);
-                String::new()
-            });
-
-            result = result.replace(full_match, &value);
-        }
-
-        Ok(result)
-    }
-
-    /// Process custom variables
-    fn process_custom_variables(&self, template: &str) -> String {
-        let mut result = template.to_string();
-
-        for (name, value) in &self.custom_variables {
-            let placeholder = format!("{{{}}}", name);
-            result = result.replace(&placeholder, value);
-        }
-
-        result
-    }
-
-    /// Load custom variables from configuration
-    pub fn load_config(&mut self, config_path: &std::path::Path) -> Result<()> {
-        if !config_path.exists() {
-            return Ok(()); // No config file is fine
-        }
-
-        let content = std::fs::read_to_string(config_path)
-            .with_context(|| format!("Failed to read config file: {}", config_path.display()))?;
-
-        // Parse simple key=value format
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-
-            if let Some((key, value)) = line.split_once('=') {
-                let key = key.trim();
-                let value = value.trim();
-
-                // Remove quotes if present
-                let value = if (value.starts_with('"') && value.ends_with('"'))
-                    || (value.starts_with('\'') && value.ends_with('\''))
+            name if name.starts_with("env:") => {
+                let name = &name[4..];
+                let mut chars = name.chars();
+                if !matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+                    || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
                 {
-                    &value[1..value.len() - 1]
-                } else {
-                    value
-                };
-
-                self.custom_variables
-                    .insert(key.to_string(), value.to_string());
+                    bail!("invalid environment variable name {name:?}");
+                }
+                env::var(name).with_context(|| {
+                    format!("required environment variable {name:?} is unavailable")
+                })?
             }
-        }
-
-        Ok(())
+            _ => unreachable!("only recognized source tokens request context"),
+        };
+        self.captured.insert(token.into(), value.clone());
+        Ok(value)
     }
 
-    /// Save custom variables to configuration
-    pub fn save_config(&self, config_path: &std::path::Path) -> Result<()> {
-        let mut content = String::new();
-        content.push_str("# PromptHive Template Variables Configuration\n");
-        content.push_str("# Format: variable_name=value\n");
-        content.push_str("# Use quotes for values with spaces\n\n");
-
-        let mut vars: Vec<_> = self.custom_variables.iter().collect();
-        vars.sort_by_key(|(k, _)| *k);
-
-        for (name, value) in vars {
-            if value.contains(' ') || value.contains('\t') {
-                content.push_str(&format!("{}=\"{}\"\n", name, value));
-            } else {
-                content.push_str(&format!("{}={}\n", name, value));
-            }
+    fn git(&self, args: &[&str], token: &str) -> Result<String> {
+        let directory = self
+            .directory
+            .as_ref()
+            .context("cannot determine the current directory")?;
+        let output = Command::new("git")
+            .args([
+                "--no-optional-locks",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.untrackedCache=false",
+            ])
+            .args(args)
+            .current_dir(directory)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .with_context(|| format!("cannot read requested Git context {{{token}}}"))?;
+        if !output.status.success() {
+            bail!("requested Git context {{{token}}} is unavailable in this directory");
         }
-
-        std::fs::write(config_path, content)
-            .with_context(|| format!("Failed to write config file: {}", config_path.display()))?;
-
-        Ok(())
-    }
-
-    /// List all available variables (for help/documentation)
-    pub fn list_available_variables(&self) -> Vec<(String, String)> {
-        let mut vars = vec![
-            // System variables
-            (
-                "{date}".to_string(),
-                "Current date (YYYY-MM-DD)".to_string(),
-            ),
-            ("{time}".to_string(), "Current time (HH:MM:SS)".to_string()),
-            (
-                "{datetime}".to_string(),
-                "Current date and time".to_string(),
-            ),
-            ("{timestamp}".to_string(), "Unix timestamp".to_string()),
-            ("{iso_date}".to_string(), "ISO 8601 date/time".to_string()),
-            ("{user}".to_string(), "Current username".to_string()),
-            ("{hostname}".to_string(), "System hostname".to_string()),
-            ("{uuid}".to_string(), "Random UUID".to_string()),
-            // Context variables
-            (
-                "{cwd}".to_string(),
-                "Current working directory (full path)".to_string(),
-            ),
-            ("{pwd}".to_string(), "Current directory name".to_string()),
-            ("{git_branch}".to_string(), "Current git branch".to_string()),
-            (
-                "{git_status}".to_string(),
-                "Git status (clean/dirty)".to_string(),
-            ),
-            (
-                "{git_hash}".to_string(),
-                "Git commit hash (short)".to_string(),
-            ),
-            // Legacy input variables
-            ("{input}".to_string(), "Input content".to_string()),
-            ("{content}".to_string(), "Input content (alias)".to_string()),
-            // Environment variables
-            (
-                "{env:VAR_NAME}".to_string(),
-                "Environment variable".to_string(),
-            ),
-        ];
-
-        // Custom variables
-        for (name, value) in &self.custom_variables {
-            vars.push((format!("{{{}}}", name), format!("Custom: {}", value)));
-        }
-
-        vars.sort_by(|a, b| a.0.cmp(&b.0));
-        vars
+        let text = String::from_utf8(output.stdout).context("Git context is not valid UTF-8")?;
+        Ok(text.trim_end_matches(['\r', '\n']).to_string())
     }
 }
 
-impl Default for TemplateProcessor {
-    fn default() -> Self {
-        Self::new()
+#[derive(Debug)]
+enum Part {
+    Text(String),
+    Input,
+}
+
+/// Compile only source tokens; rendering can never reinterpret inserted text.
+pub(crate) struct PreparedTemplate {
+    parts: Vec<Part>,
+    has_input: bool,
+}
+
+impl PreparedTemplate {
+    pub(crate) fn compile(
+        source: &str,
+        declared: &Declarations,
+        supplied: &Variables,
+        context: &mut RenderContext,
+    ) -> Result<Self> {
+        validate_declarations(declared)?;
+        let mut values = Variables::new();
+        for (name, default) in declared {
+            let value = supplied.get(name).or(default.as_ref()).with_context(|| {
+                format!("required variable {name:?} is missing; supply -v {name}=VALUE")
+            })?;
+            values.insert(name.clone(), value.clone());
+        }
+
+        let mut prepared = Self {
+            parts: Vec::new(),
+            has_input: false,
+        };
+        let mut offset = 0;
+        while let Some(relative) = source[offset..].find('{') {
+            let start = offset + relative;
+            prepared.push_text(&source[offset..start]);
+            if source[start..].starts_with("{{") {
+                if let Some(relative_end) = source[start + 2..].find("}}") {
+                    let end = start + 2 + relative_end;
+                    let token = &source[start + 2..end];
+                    if is_reserved_name(token) || declared.contains_key(token) {
+                        prepared.push_text(&format!("{{{token}}}"));
+                    } else {
+                        prepared.push_text(&source[start..end + 2]);
+                    }
+                    offset = end + 2;
+                    continue;
+                }
+                prepared.push_text(&source[start..]);
+                offset = source.len();
+                break;
+            }
+            let Some(relative_end) = source[start + 1..].find('}') else {
+                prepared.push_text(&source[start..]);
+                offset = source.len();
+                break;
+            };
+            let end = start + 1 + relative_end;
+            let token = &source[start + 1..end];
+            if token.contains('{') {
+                prepared.push_text("{");
+                offset = start + 1;
+                continue;
+            }
+            if INPUT_SLOTS.contains(&token) {
+                prepared.parts.push(Part::Input);
+                prepared.has_input = true;
+            } else if SYSTEM_SLOTS.contains(&token) || token.starts_with("env:") {
+                prepared.push_text(&context.value(token)?);
+            } else if let Some(value) = values.get(token) {
+                prepared.push_text(value);
+            } else {
+                prepared.push_text(&source[start..=end]);
+            }
+            offset = end + 1;
+        }
+        prepared.push_text(&source[offset..]);
+        Ok(prepared)
+    }
+
+    fn push_text(&mut self, value: &str) {
+        if value.is_empty() {
+            return;
+        }
+        match self.parts.last_mut() {
+            Some(Part::Text(previous)) => previous.push_str(value),
+            _ => self.parts.push(Part::Text(value.to_string())),
+        }
+    }
+
+    pub(crate) fn prepend(&mut self, mut before: Self) {
+        before.push_text("\n\n");
+        before.parts.append(&mut self.parts);
+        self.parts = before.parts;
+        self.has_input |= before.has_input;
+    }
+
+    pub(crate) fn render(&self, input: &str) -> String {
+        let mut result = String::new();
+        for part in &self.parts {
+            match part {
+                Part::Text(text) => result.push_str(text),
+                Part::Input => result.push_str(input),
+            }
+        }
+        if !self.has_input && !input.is_empty() {
+            result.push_str("\n\n");
+            result.push_str(input);
+        }
+        result
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     #[test]
-    fn test_input_variables() {
+    fn all_input_spellings_preserve_empty_and_whitespace() {
         let processor = TemplateProcessor::new();
+        for name in INPUT_SLOTS {
+            let source = format!("prefix {{{name}}} suffix");
+            assert_eq!(
+                processor.process(&source, "  α\n\n").unwrap(),
+                "prefix   α\n\n suffix"
+            );
+            assert_eq!(processor.process(&source, "").unwrap(), "prefix  suffix");
+        }
+    }
 
-        let result = processor
-            .process("Process this: {input}", "test data")
+    #[test]
+    fn input_is_not_reparsed_as_environment_or_system_source() {
+        let source = "Review {input}";
+        let data = "{env:PROMPTHIVE_LITERAL_INPUT_MUST_NOT_READ} {date} $(false) {input}";
+        assert_eq!(
+            TemplateProcessor::new().process(source, data).unwrap(),
+            format!("Review {data}")
+        );
+    }
+
+    #[test]
+    fn values_and_defaults_are_literal() {
+        let processor = TemplateProcessor::new();
+        let declared = BTreeMap::from([("tone".into(), Some("{date}".into()))]);
+        assert_eq!(
+            processor
+                .process_with_variables("{tone}: {input}", "text", &declared, &Variables::new())
+                .unwrap(),
+            "{date}: text"
+        );
+        let values = BTreeMap::from([("tone".into(), "{input} {env:SHOULD_NOT_READ}".into())]);
+        assert_eq!(
+            processor
+                .process_with_variables("{tone}: {input}", "text", &declared, &values)
+                .unwrap(),
+            "{input} {env:SHOULD_NOT_READ}: text"
+        );
+    }
+
+    #[test]
+    fn undeclared_code_and_json_braces_stay_literal() {
+        let source = "fn f() {foo}\n{\"name\": \"value\"}\n{{unknown}}";
+        assert_eq!(
+            TemplateProcessor::new().process(source, "").unwrap(),
+            source
+        );
+        assert_eq!(
+            TemplateProcessor::new()
+                .process("{\"value\": \"{input}\"}", "data")
+                .unwrap(),
+            "{\"value\": \"data\"}"
+        );
+    }
+
+    #[test]
+    fn escaped_tokens_do_not_request_context_or_consume_input() {
+        let processor = TemplateProcessor::new();
+        assert_eq!(
+            processor
+                .process(
+                    "{{input}} {{date}} {{env:UNAVAILABLE_ESCAPED_NAME}}",
+                    "data"
+                )
+                .unwrap(),
+            "{input} {date} {env:UNAVAILABLE_ESCAPED_NAME}\n\ndata"
+        );
+        let declarations = BTreeMap::from([("topic".into(), Some("ignored".into()))]);
+        assert_eq!(
+            processor
+                .process_with_variables("{{topic}}", "", &declarations, &Variables::new())
+                .unwrap(),
+            "{topic}"
+        );
+        assert_eq!(
+            processor
+                .process("{{env:UNAVAILABLE_MALFORMED_ESCAPE}", "")
+                .unwrap(),
+            "{{env:UNAVAILABLE_MALFORMED_ESCAPE}"
+        );
+    }
+
+    #[test]
+    fn required_unknown_invalid_and_reserved_variables_fail() {
+        let processor = TemplateProcessor::new();
+        let declared = BTreeMap::from([("topic".into(), None)]);
+        assert!(processor
+            .process_with_variables("{topic}", "", &declared, &Variables::new())
+            .unwrap_err()
+            .to_string()
+            .contains("topic"));
+        let supplied = BTreeMap::from([("typo".into(), "value".into())]);
+        assert!(processor
+            .process_with_variables("text", "", &Declarations::new(), &supplied)
+            .is_err());
+        for name in ["input", "date", "has-dash", "1name", "", "env:NAME"] {
+            assert!(
+                validate_declarations(&BTreeMap::from([(name.into(), Some("x".into()))])).is_err(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn context_without_input_slot_does_not_drop_input() {
+        let result = TemplateProcessor::new()
+            .process("Today {date}; JSON {foo}", "  context\n")
             .unwrap();
-        assert_eq!(result, "Process this: test data");
-
-        let result = processor.process("Content: {content}", "hello").unwrap();
-        assert_eq!(result, "Content: hello");
+        assert!(result.ends_with("; JSON {foo}\n\n  context\n"));
     }
 
     #[test]
-    fn test_system_variables() {
-        let processor = TemplateProcessor::new();
-
-        let result = processor.process("Today is {date}", "").unwrap();
-        assert!(result.contains("Today is 2"));
-
-        let result = processor.process("User: {user}", "").unwrap();
-        assert!(result.starts_with("User: "));
+    fn repeated_context_values_are_captured_once() {
+        let result = TemplateProcessor::new()
+            .process("{uuid}|{uuid}|{timestamp}|{timestamp}", "")
+            .unwrap();
+        let parts: Vec<_> = result.split('|').collect();
+        assert_eq!(parts[0], parts[1]);
+        assert_eq!(parts[2], parts[3]);
     }
 
     #[test]
-    fn test_environment_variables() {
-        let processor = TemplateProcessor::new();
-
-        env::set_var("TEST_VAR", "test_value");
-        let result = processor.process("Env: {env:TEST_VAR}", "").unwrap();
-        assert_eq!(result, "Env: test_value");
-
-        let result = processor.process("Missing: {env:NONEXISTENT}", "").unwrap();
-        assert_eq!(result, "Missing: ");
+    fn environment_value_is_cached_and_opaque() {
+        let name = format!("PROMPTHIVE_TEMPLATE_TEST_{}", uuid::Uuid::new_v4().simple());
+        env::set_var(&name, "{date}");
+        let mut context = RenderContext::capture();
+        let token = format!("env:{name}");
+        assert_eq!(context.value(&token).unwrap(), "{date}");
+        env::set_var(&name, "changed");
+        assert_eq!(context.value(&token).unwrap(), "{date}");
+        let template = format!("{{{token}}}");
+        let prepared = PreparedTemplate::compile(
+            &template,
+            &Declarations::new(),
+            &Variables::new(),
+            &mut context,
+        )
+        .unwrap();
+        assert_eq!(prepared.render(""), "{date}");
+        env::remove_var(&name);
+        assert!(RenderContext::capture().value(&token).is_err());
     }
 
     #[test]
-    fn test_custom_variables() {
-        let mut processor = TemplateProcessor::new();
-        processor.set_custom_variable("project", "PromptHive");
-
-        let result = processor.process("Working on {project}", "").unwrap();
-        assert_eq!(result, "Working on PromptHive");
-    }
-
-    #[test]
-    fn test_config_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let config_path = temp_dir.path().join("variables.conf");
-
-        let mut processor = TemplateProcessor::new();
-        processor.set_custom_variable("author", "John Doe");
-        processor.set_custom_variable("project", "Test Project");
-
-        processor.save_config(&config_path).unwrap();
-
-        let mut new_processor = TemplateProcessor::new();
-        new_processor.load_config(&config_path).unwrap();
-
-        assert_eq!(
-            new_processor.custom_variables.get("author").unwrap(),
-            "John Doe"
-        );
-        assert_eq!(
-            new_processor.custom_variables.get("project").unwrap(),
-            "Test Project"
-        );
-    }
-
-    #[test]
-    fn test_legacy_behavior() {
-        let processor = TemplateProcessor::new();
-
-        // No placeholders should append input
-        let result = processor.process("Simple prompt", "input data").unwrap();
-        assert_eq!(result, "Simple prompt\n\ninput data");
-
-        // With placeholders should not append
-        let result = processor.process("Process {input}", "input data").unwrap();
-        assert_eq!(result, "Process input data");
+    fn requested_missing_git_context_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut context = RenderContext::capture();
+        context.directory = Some(directory.path().to_path_buf());
+        assert!(context.value("git_branch").is_err());
     }
 }

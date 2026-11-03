@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$repo_root"
+mode=${1:---check}
+if [[ $# -gt 1 || ( "$mode" != --check && "$mode" != --publish ) ]]; then
+  echo 'Usage: scripts/release [--check|--publish]' >&2
+  exit 2
+fi
+.workflow/check-release --stage local
+bash scripts/check
+cargo package --locked
+if [[ "$mode" == --publish ]]; then
+  cargo publish --locked
+fi

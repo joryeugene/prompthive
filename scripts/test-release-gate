@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# A safe negative sentinel. This never publishes or uses real Cargo.
+set -euo pipefail
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+fixture=$(mktemp -d)
+trap 'rm -rf -- "$fixture"' EXIT
+mkdir "$fixture/bin"
+cat > "$fixture/bin/cargo" <<'CARGO'
+#!/usr/bin/env bash
+: > "$PROMPTHIVE_GATE_SENTINEL"
+exit 0
+CARGO
+chmod +x "$fixture/bin/cargo"
+for mode in --check --publish; do
+  if PROMPTHIVE_ACCEPTANCE_ROOT="$fixture/missing" PROMPTHIVE_GATE_SENTINEL="$fixture/executed" PATH="$fixture/bin:$PATH" bash "$repo_root/scripts/release" "$mode" > "$fixture/stdout" 2> "$fixture/stderr"; then
+    echo "Missing acceptance allowed $mode" >&2
+    exit 1
+  fi
+  test ! -e "$fixture/executed"
+  test ! -s "$fixture/stdout"
+  test -s "$fixture/stderr"
+done
+printf '%s\n' 'Release gate refused missing evidence before Cargo in check and publish modes.'

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Acceptance evidence stays with the release workspace, never in user stores.
+set -euo pipefail
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+acceptance_root=${PROMPTHIVE_ACCEPTANCE_ROOT:-"$repo_root/../.workflow"}
+checker="$acceptance_root/check-release"
+if [[ ! -x "$checker" || "$checker" -ef "${BASH_SOURCE[0]}" ]]; then
+  echo 'Release acceptance is missing. Set PROMPTHIVE_ACCEPTANCE_ROOT to the reviewed workspace .workflow directory.' >&2
+  exit 1
+fi
+exec "$checker" "$@"

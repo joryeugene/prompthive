@@ -1,12 +1,26 @@
-use crate::storage::{PromptMetadata, Storage};
-use anyhow::{Context, Result};
-use regex::Regex;
+//! Explicit local imports, preserving source bytes and keeping conflict decisions visible.
+
+use anyhow::{bail, Context, Result};
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
 use std::fs;
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 use walkdir::WalkDir;
+
+use crate::persistence::Directory;
+use crate::portability::{self, VerifiedCompatibility, COMPATIBILITY_NAME};
+use crate::Storage;
 
 pub struct Importer {
     storage: Storage,
+}
+
+struct ImportEntry {
+    id: String,
+    source: PathBuf,
+    bytes: Vec<u8>,
 }
 
 impl Importer {
@@ -14,603 +28,588 @@ impl Importer {
         Self { storage }
     }
 
-    /// Import prompts from a directory or file
     pub fn import_from_path(&self, path: &str) -> Result<ImportResult> {
-        let path = Path::new(path);
-
-        if !path.exists() {
-            return Err(anyhow::anyhow!("Path does not exist: {}", path.display()));
-        }
-
-        let mut result = ImportResult::new();
-
-        if path.is_file() {
-            self.import_file(path, &mut result)?;
-        } else if path.is_dir() {
-            self.import_directory(path, &mut result)?;
-        }
-
-        Ok(result)
+        self.import_with_options(path, None, false, false, false, false, false)
     }
 
-    /// Enhanced import with custom naming, force overwrite, versioning, skip, and update support
     pub fn import_from_path_enhanced(
         &self,
         path: &str,
-        custom_name: Option<&str>,
+        name: Option<&str>,
         force: bool,
         version: bool,
         skip: bool,
         update: bool,
     ) -> Result<ImportResult> {
-        let path = Path::new(path);
-
-        if !path.exists() {
-            return Err(anyhow::anyhow!("Path does not exist: {}", path.display()));
-        }
-
-        let mut result = ImportResult::new();
-
-        if path.is_file() {
-            self.import_file_enhanced(
-                path,
-                custom_name,
-                force,
-                version,
-                skip,
-                update,
-                &mut result,
-            )?;
-        } else if path.is_dir() {
-            self.import_directory_enhanced(
-                path,
-                custom_name,
-                force,
-                version,
-                skip,
-                update,
-                &mut result,
-            )?;
-        }
-
-        Ok(result)
+        self.import_with_options(path, name, force, version, skip, update, false)
     }
 
-    /// Import from Claude Code session files
-    pub fn import_claude_session(&self, session_path: &str) -> Result<ImportResult> {
-        let path = Path::new(session_path);
-        let mut result = ImportResult::new();
-
-        // Look for .md files that look like prompts
-        for entry in WalkDir::new(path)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("md"))
-        {
-            if self.looks_like_prompt(entry.path())? {
-                self.import_file(entry.path(), &mut result)?;
-            }
-        }
-
-        Ok(result)
-    }
-
-    fn import_file(&self, file_path: &Path, result: &mut ImportResult) -> Result<()> {
-        let content = fs::read_to_string(file_path)
-            .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
-
-        // Extract filename as prompt name
-        let name = file_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| anyhow::anyhow!("Invalid filename: {}", file_path.display()))?;
-
-        // Clean up name for prompt use
-        let clean_name = self.clean_prompt_name(name);
-
-        // Parse content
-        let (metadata, body) = self.parse_content(&content, &clean_name, false)?;
-
-        // Check if prompt already exists
-        if self.storage.prompt_path(&clean_name).exists() {
-            result.add_skipped(&clean_name, "Already exists");
-            return Ok(());
-        }
-
-        // Write prompt
-        self.storage.write_prompt(&clean_name, &metadata, &body)?;
-        result.add_imported(&clean_name);
-
-        Ok(())
-    }
-
+    // Retain the existing library handler signature for callers.
     #[allow(clippy::too_many_arguments)]
-    fn import_file_enhanced(
+    pub fn import_with_options(
         &self,
-        file_path: &Path,
-        custom_name: Option<&str>,
+        path: &str,
+        name: Option<&str>,
         force: bool,
         version: bool,
         skip: bool,
         update: bool,
-        result: &mut ImportResult,
-    ) -> Result<()> {
-        let content = fs::read_to_string(file_path)
-            .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
-
-        // Determine prompt name
-        let prompt_name = if let Some(name) = custom_name {
-            // Use custom name (Gap 1 fix)
-            self.clean_prompt_name(name)
+        dry_run: bool,
+    ) -> Result<ImportResult> {
+        if [force, version, skip, update]
+            .into_iter()
+            .filter(|flag| *flag)
+            .count()
+            > 1
+        {
+            bail!("choose one import conflict policy: --force, --version, --skip, or --update");
+        }
+        let path = Path::new(path);
+        let info = fs::symlink_metadata(path)
+            .with_context(|| format!("cannot read import source '{}'", path.display()))?;
+        if info.file_type().is_symlink() {
+            bail!("import source is a symlink; select its actual local directory or file");
+        }
+        let manifest = if info.is_dir() {
+            portability::load_manifest(path, &self.storage)?
         } else {
-            // Extract filename as prompt name (original behavior)
-            let name = file_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .ok_or_else(|| anyhow::anyhow!("Invalid filename: {}", file_path.display()))?;
-            self.clean_prompt_name(name)
+            None
         };
-
-        // Handle versioning
-        let final_name = if version {
-            self.find_next_version_name(&prompt_name)
+        if manifest.is_some() && name.is_some() {
+            bail!("a portable store already contains canonical names; a custom NAME is only for loose files or directories: ph import PATH NAME");
+        }
+        if info.is_dir() && is_legacy_store(path) && name.is_some() {
+            bail!("a complete local store already contains canonical names; a custom NAME is only for a loose file, bank, or directory: ph import PATH NAME");
+        }
+        let mut compatibility_warning = None;
+        let compatibility = if let Some(manifest) = &manifest {
+            manifest.compatibility.clone()
+        } else if info.is_dir() && is_legacy_store(path) {
+            match portability::read_verified_compatibility(path) {
+                Ok(bindings) => bindings,
+                Err(error) => {
+                    compatibility_warning =
+                        Some(format!("Source bindings were not adopted: {error:#}"));
+                    BTreeMap::new()
+                }
+            }
         } else {
-            prompt_name
+            BTreeMap::new()
         };
-
-        // Parse content
-        let (metadata, body) = self.parse_content(&content, &final_name, version)?;
-
-        // Check if prompt already exists with enhanced conflict resolution
-        let prompt_path = self.storage.prompt_path(&final_name);
-        if prompt_path.exists() {
-            if skip {
-                result.add_skipped(&final_name, "Skipped (already exists)");
-                return Ok(());
-            } else if update {
-                // Check if source is newer than target
-                let source_modified = fs::metadata(file_path)?.modified()?;
-                let target_modified = fs::metadata(&prompt_path)?.modified()?;
-
-                if source_modified <= target_modified {
-                    result.add_skipped(&final_name, "Skipped (target is newer or same)");
+        let mut entries = Vec::new();
+        let mut recovery_sources = Vec::new();
+        if let Some(manifest) = &manifest {
+            for prompt in &manifest.prompts {
+                let source = portability::checked_source_path(path, Path::new(&prompt.path))?;
+                let bytes = portability::read_source_bytes(path, Path::new(&prompt.path))?;
+                if portability::digest(&bytes) != prompt.sha256.to_lowercase() {
+                    bail!(
+                        "checksum mismatch for '{}' in export; no import was started",
+                        prompt.id
+                    );
+                }
+                entries.push(ImportEntry {
+                    id: prompt.id.clone(),
+                    source,
+                    bytes,
+                });
+            }
+        } else if info.is_file() {
+            let id = match name {
+                Some(name) => name.to_owned(),
+                None => file_stem(path)?,
+            };
+            let parent = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            let file = path.file_name().context("import source has no filename")?;
+            entries.push(ImportEntry {
+                id,
+                source: path.to_path_buf(),
+                bytes: portability::read_source_bytes(parent, Path::new(file))?,
+            });
+        } else if info.is_dir() {
+            self.collect_directory(path, name, &mut entries, &mut recovery_sources)?;
+        } else {
+            bail!("import source is not a regular file or directory");
+        }
+        let mut seen = BTreeSet::new();
+        for entry in &entries {
+            self.storage.prompt_path(&entry.id)?;
+            if !seen.insert(entry.id.clone()) {
+                bail!("import contains duplicate canonical name '{}'", entry.id);
+            }
+            let text = std::str::from_utf8(&entry.bytes)
+                .with_context(|| format!("'{}' is not valid UTF-8", entry.source.display()))?;
+            self.storage.parse_prompt_content(text).with_context(|| {
+                format!("cannot parse import source '{}'", entry.source.display())
+            })?;
+        }
+        entries.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut result = ImportResult {
+            dry_run,
+            ..Default::default()
+        };
+        if !recovery_sources.is_empty() {
+            result.migration_report.push(format!("This import copies live prompts only. Recovery snapshots remain untouched in '{}'; copy the whole source directory separately to retain that rollback history.", path.display()));
+            result.migration_report.extend(
+                recovery_sources
+                    .into_iter()
+                    .map(|source| format!("Retained source recovery directory: {source}")),
+            );
+        }
+        if let Some(warning) = compatibility_warning {
+            result
+                .compatibility_skipped
+                .push((COMPATIBILITY_NAME.into(), warning));
+        }
+        if dry_run && info.is_dir() && is_legacy_store(path) {
+            let old = Storage::new_with_base(path.to_path_buf())?;
+            result
+                .migration_report
+                .extend(crate::matching::legacy_code_report(&old)?);
+        }
+        let mut available_targets = BTreeMap::new();
+        let mut planned_targets = BTreeMap::new();
+        for entry in entries {
+            let original_name = entry.id.clone();
+            let outcome = (|| -> Result<()> {
+                let target = self.storage.prompt_path(&entry.id)?;
+                let existing = if let Some(bytes) = planned_targets.get(&entry.id) {
+                    Some(Vec::clone(bytes))
+                } else if target.try_exists()? {
+                    Some(self.storage.read_raw(&entry.id)?)
+                } else {
+                    None
+                };
+                let has_history = !self.storage.snapshot_paths(&entry.id)?.is_empty();
+                let id = if version && (existing.is_some() || has_history) {
+                    self.next_version_name(&entry.id, &planned_targets)?
+                } else {
+                    entry.id.clone()
+                };
+                let renamed = id != entry.id;
+                if existing.is_none() && has_history && !renamed && !force && !update {
+                    if skip {
+                        result
+                            .skipped
+                            .push((id, "Recovery history exists; skipped".into()));
+                        return Ok(());
+                    }
+                    bail!("prompt has recovery history; restore it or explicitly choose --force or --version");
+                }
+                if let Some(existing) = &existing {
+                    if !renamed && *existing == entry.bytes {
+                        result
+                            .skipped
+                            .push((id.clone(), "Already identical".into()));
+                        available_targets.insert(original_name.clone(), entry.bytes.clone());
+                        return Ok(());
+                    }
+                    if !renamed && !force && !update {
+                        result.skipped.push((
+                            id.clone(),
+                            "Already exists; choose --force, --version, --skip, or --update".into(),
+                        ));
+                        return Ok(());
+                    }
+                    if !renamed && update {
+                        let source_time = modified(&entry.source)?;
+                        let target_time = modified(&target)?;
+                        if source_time <= target_time {
+                            result.skipped.push((
+                                id.clone(),
+                                "Target is newer or has the same modification time".into(),
+                            ));
+                            return Ok(());
+                        }
+                    }
+                }
+                if dry_run {
+                    planned_targets.insert(id.clone(), entry.bytes.clone());
+                    result.planned.push(id.clone());
+                    if !renamed {
+                        available_targets.insert(original_name.clone(), entry.bytes.clone());
+                    }
                     return Ok(());
                 }
-                // Continue with update since source is newer
-            } else if !force {
-                result.add_skipped(&final_name, "Already exists");
-                return Ok(());
+                self.storage
+                    .write_raw(&id, &entry.bytes, !renamed && (force || update))?;
+                result.imported.push(id);
+                if !renamed {
+                    available_targets.insert(original_name.clone(), entry.bytes.clone());
+                }
+                Ok(())
+            })();
+            if let Err(error) = outcome {
+                result.errors.push((original_name, format!("{error:#}")));
             }
         }
-
-        // Write prompt (will overwrite if force=true)
-        self.storage.write_prompt(&final_name, &metadata, &body)?;
-        result.add_imported(&final_name);
-
-        Ok(())
+        if let Err(error) =
+            self.import_bindings(&compatibility, &available_targets, dry_run, &mut result)
+        {
+            result.errors.push((COMPATIBILITY_NAME.into(), format!("Prompt processing completed, but compatibility bindings were not committed: {error:#}")));
+        }
+        Ok(result)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn import_directory_enhanced(
+    fn collect_directory(
         &self,
-        dir_path: &Path,
-        custom_name: Option<&str>,
-        force: bool,
-        version: bool,
-        skip: bool,
-        update: bool,
-        result: &mut ImportResult,
+        root: &Path,
+        name: Option<&str>,
+        entries: &mut Vec<ImportEntry>,
+        recovery_sources: &mut Vec<String>,
     ) -> Result<()> {
-        // Check if this is a bank directory (contains bank.yaml or looks like a bank)
-        let bank_yaml = dir_path.join("bank.yaml");
-        let is_bank = bank_yaml.exists()
-            || dir_path.starts_with("banks/")
-            || (dir_path.parent().is_some_and(|p| p.ends_with("banks")));
-
-        if is_bank {
-            // Import as a bank - preserve structure
-            let bank_name = custom_name.unwrap_or_else(|| {
-                dir_path
+        let legacy = is_legacy_store(root);
+        let bank = root.join("bank.yaml").is_file()
+            || root
+                .parent()
+                .is_some_and(|parent| parent.ends_with("banks"));
+        let bank_prefix = if bank {
+            Some(match name {
+                Some(name) => name.to_owned(),
+                None => root
                     .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("imported-bank")
-            });
-
-            self.import_bank(dir_path, bank_name, force, skip, update, result)?;
+                    .and_then(OsStr::to_str)
+                    .context("bank directory must have a Unicode name")?
+                    .to_owned(),
+            })
         } else {
-            // Regular directory import - flatten structure
-            for entry in WalkDir::new(dir_path)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_file())
-            {
-                let path = entry.path();
-
-                // Skip hidden files and non-text files
-                if path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .is_none_or(|s| s.starts_with('.'))
+            name.map(str::to_owned)
+        };
+        let walker = WalkDir::new(root)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|entry| {
+                if entry.depth() == 0 {
+                    return true;
+                }
+                let Some(name) = entry.file_name().to_str() else {
+                    return true;
+                };
+                if (legacy || bank) && entry.file_type().is_dir() && name.ends_with(".versions") {
+                    recovery_sources.push(entry.path().display().to_string());
+                    return false;
+                }
+                if name.starts_with('.') {
+                    return false;
+                }
+                true
+            });
+        for entry in walker {
+            let entry = entry
+                .with_context(|| format!("cannot enumerate import source '{}'", root.display()))?;
+            if entry.file_type().is_symlink() {
+                bail!("import contains a symlink: '{}'", entry.path().display());
+            }
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let relative = entry.path().strip_prefix(root)?;
+            if !is_text_extension(entry.path()) {
+                continue;
+            }
+            let id = if legacy {
+                let parts: Vec<_> = relative
+                    .components()
+                    .map(|p| p.as_os_str().to_string_lossy().into_owned())
+                    .collect();
+                if parts.first().map(String::as_str) == Some("prompts") && parts.len() == 2 {
+                    file_stem(entry.path())?
+                } else if parts.first().map(String::as_str) == Some("prompts") {
+                    bail!("nested plain prompt '{}' has no unambiguous canonical name; import that file explicitly with a custom NAME: ph import PATH NAME", entry.path().display());
+                } else if parts.first().map(String::as_str) == Some("banks") && parts.len() >= 3 {
+                    if entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.eq_ignore_ascii_case("README.md"))
+                    {
+                        continue;
+                    }
+                    without_extension(Path::new(&parts[1..].join("/")))?
+                } else if parts.first().map(String::as_str) == Some("teams") && parts.len() >= 3 {
+                    format!("@{}", without_extension(Path::new(&parts[1..].join("/")))?)
+                } else {
+                    continue;
+                }
+            } else {
+                if bank
+                    && entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.eq_ignore_ascii_case("README.md"))
                 {
                     continue;
                 }
-
-                // Only import text-like files
-                if self.is_text_file(path)? {
-                    if let Err(e) =
-                        self.import_file_enhanced(path, None, force, version, skip, update, result)
-                    {
-                        result.add_error(path.to_string_lossy().to_string(), e.to_string());
-                    }
+                let local = without_extension(relative)?;
+                match &bank_prefix {
+                    Some(prefix) => format!("{prefix}/{local}"),
+                    None => local,
                 }
-            }
+            };
+            let source = portability::checked_source_path(root, relative)?;
+            entries.push(ImportEntry {
+                id,
+                bytes: portability::read_source_bytes(root, relative)?,
+                source,
+            });
         }
-
         Ok(())
     }
 
-    fn import_directory(&self, dir_path: &Path, result: &mut ImportResult) -> Result<()> {
-        for entry in WalkDir::new(dir_path)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-        {
-            let path = entry.path();
-
-            // Skip hidden files and non-text files
-            if path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .is_none_or(|s| s.starts_with('.'))
+    fn next_version_name(&self, id: &str, planned: &BTreeMap<String, Vec<u8>>) -> Result<String> {
+        for number in 2..=10000 {
+            let candidate = format!("{id}-v{number}");
+            if !planned.contains_key(&candidate)
+                && !self.storage.prompt_path(&candidate)?.try_exists()?
+                && self.storage.snapshot_paths(&candidate)?.is_empty()
             {
-                continue;
-            }
-
-            // Only import text-like files
-            if self.is_text_file(path)? {
-                if let Err(e) = self.import_file(path, result) {
-                    result.add_error(path.to_string_lossy().to_string(), e.to_string());
-                }
+                return Ok(candidate);
             }
         }
-
-        Ok(())
+        bail!("no available import version name for '{id}'");
     }
 
-    fn parse_content(
+    fn import_bindings(
         &self,
-        content: &str,
-        name: &str,
-        version_flag: bool,
-    ) -> Result<(PromptMetadata, String)> {
-        // Try to parse existing frontmatter
-        if content.starts_with("---") {
-            return self.storage.parse_prompt_content(content);
-        }
-
-        // Auto-generate metadata for files without frontmatter
-        let description = self
-            .extract_description(content)
-            .unwrap_or_else(|| format!("Imported from {}", name));
-
-        let metadata = PromptMetadata {
-            id: name.to_string(),
-            description,
-            tags: Some(vec!["imported".to_string()]),
-            created_at: Some(chrono::Utc::now().to_rfc3339()),
-            updated_at: None,
-            version: if version_flag {
-                Some("v1.0".to_string())
-            } else {
-                None
-            },
-            git_hash: None,
-            parent_version: None,
-        };
-
-        Ok((metadata, content.to_string()))
-    }
-
-    fn extract_description(&self, content: &str) -> Option<String> {
-        let lines: Vec<&str> = content.lines().collect();
-
-        // Look for first line that looks like a title or description
-        for line in lines.iter().take(10) {
-            let line = line.trim();
-
-            // Skip empty lines
-            if line.is_empty() {
-                continue;
-            }
-
-            // If it starts with #, use as title
-            if line.starts_with('#') {
-                return Some(line.trim_start_matches('#').trim().to_string());
-            }
-
-            // If it's a reasonable length and looks descriptive
-            if line.len() > 10 && line.len() < 100 && !line.starts_with("```") {
-                return Some(line.to_string());
-            }
-        }
-
-        None
-    }
-
-    fn clean_prompt_name(&self, name: &str) -> String {
-        // Replace spaces and special chars with hyphens
-        let re = Regex::new(r"[^a-zA-Z0-9\-_]").unwrap();
-        let cleaned = re.replace_all(name, "-");
-
-        // Remove multiple consecutive hyphens
-        let re = Regex::new(r"-+").unwrap();
-        let cleaned = re.replace_all(&cleaned, "-");
-
-        // Trim hyphens from start/end
-        cleaned.trim_matches('-').to_lowercase()
-    }
-
-    fn find_next_version_name(&self, base_name: &str) -> String {
-        // Check if base name exists
-        if !self.storage.prompt_path(base_name).exists() {
-            return base_name.to_string();
-        }
-
-        // Find next available version (file-v2, file-v3, etc.)
-        let mut version = 2;
-        loop {
-            let versioned_name = format!("{}-v{}", base_name, version);
-            if !self.storage.prompt_path(&versioned_name).exists() {
-                return versioned_name;
-            }
-            version += 1;
-
-            // Safety check to prevent infinite loop
-            if version > 1000 {
-                return format!("{}-v{}", base_name, chrono::Utc::now().timestamp());
-            }
-        }
-    }
-
-    /// Import an entire bank preserving structure
-    fn import_bank(
-        &self,
-        bank_path: &Path,
-        bank_name: &str,
-        force: bool,
-        skip: bool,
-        update: bool,
+        bindings: &BTreeMap<String, String>,
+        available: &BTreeMap<String, Vec<u8>>,
+        dry_run: bool,
         result: &mut ImportResult,
     ) -> Result<()> {
-        // Ensure bank directory exists in storage
-        let target_bank_dir = self.storage.base_dir().join("banks").join(bank_name);
-        fs::create_dir_all(&target_bank_dir)?;
-
-        // Copy bank.yaml if it exists
-        let bank_yaml_src = bank_path.join("bank.yaml");
-        if bank_yaml_src.exists() {
-            let bank_yaml_dest = target_bank_dir.join("bank.yaml");
-            fs::copy(&bank_yaml_src, &bank_yaml_dest)?;
+        if bindings.is_empty() {
+            return Ok(());
         }
-
-        // Copy README.md if it exists
-        let readme_src = bank_path.join("README.md");
-        if readme_src.exists() {
-            let readme_dest = target_bank_dir.join("README.md");
-            fs::copy(&readme_src, &readme_dest)?;
-        }
-
-        // Import all markdown files in the bank
-        for entry in fs::read_dir(bank_path)? {
-            let entry = entry?;
-            let path = entry.path();
-
-            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("md") {
-                if let Some(file_name) = path.file_stem().and_then(|s| s.to_str()) {
-                    // Skip README
-                    if file_name.eq_ignore_ascii_case("readme") {
-                        continue;
+        let root = if dry_run && !self.storage.base_dir().try_exists()? {
+            None
+        } else {
+            Some(Directory::open(self.storage.base_dir(), false)?)
+        };
+        let _lock = if dry_run {
+            None
+        } else {
+            root.as_ref().map(Directory::lock_file).transpose()?
+        };
+        let previous = match root
+            .as_ref()
+            .map(|root| root.read(OsStr::new(COMPATIBILITY_NAME)))
+        {
+            Some(Ok((bytes, _))) => Some(bytes),
+            Some(Err(error))
+                if error.chain().any(|cause| {
+                    cause
+                        .downcast_ref::<io::Error>()
+                        .is_some_and(|error| error.kind() == io::ErrorKind::NotFound)
+                }) =>
+            {
+                None
+            }
+            Some(Err(error)) => return Err(error),
+            None => None,
+        };
+        let mut existing = if let Some(bytes) = &previous {
+            let config: VerifiedCompatibility = match toml::from_str(std::str::from_utf8(bytes)?) {
+                Ok(config) => config,
+                Err(_) => {
+                    for code in bindings.keys() {
+                        result.compatibility_skipped.push((
+                            code.clone(),
+                            "Existing compatibility file is invalid; it was preserved".into(),
+                        ));
                     }
-
-                    let prompt_name = format!("{}/{}", bank_name, file_name);
-
-                    // Check if prompt already exists with enhanced conflict resolution
-                    let prompt_path = self.storage.prompt_path(&prompt_name);
-                    if prompt_path.exists() {
-                        if skip {
-                            result.add_skipped(&prompt_name, "Skipped (already exists)");
-                            continue;
-                        } else if update {
-                            // Check if source is newer than target
-                            let source_modified = fs::metadata(&path)?.modified()?;
-                            let target_modified = fs::metadata(&prompt_path)?.modified()?;
-
-                            if source_modified <= target_modified {
-                                result
-                                    .add_skipped(&prompt_name, "Skipped (target is newer or same)");
-                                continue;
-                            }
-                            // Continue with update since source is newer
-                        } else if !force {
-                            result.add_skipped(&prompt_name, "Already exists");
-                            continue;
-                        }
-                    }
-
-                    // Read and parse the prompt
-                    let content = fs::read_to_string(&path)?;
-                    let (metadata, body) = self.parse_content(&content, file_name, false)?;
-
-                    // Write prompt with bank prefix
-                    self.storage.write_prompt(&prompt_name, &metadata, &body)?;
-                    result.add_imported(&prompt_name);
+                    return Ok(());
                 }
-            } else if path.is_dir() {
-                // Handle subdirectories (like static/ and dynamic/ in snippets bank)
-                let subdir_name = path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("subdir");
-                let subdir_target = target_bank_dir.join(subdir_name);
-                fs::create_dir_all(&subdir_target)?;
-
-                // Import files from subdirectory
-                for subentry in fs::read_dir(&path)? {
-                    let subentry = subentry?;
-                    let subpath = subentry.path();
-
-                    if subpath.is_file()
-                        && subpath.extension().and_then(|s| s.to_str()) == Some("md")
-                    {
-                        if let Some(file_name) = subpath.file_stem().and_then(|s| s.to_str()) {
-                            let prompt_name =
-                                format!("{}/{}/{}", bank_name, subdir_name, file_name);
-
-                            let prompt_path = self.storage.prompt_path(&prompt_name);
-                            if prompt_path.exists() {
-                                if skip {
-                                    result.add_skipped(&prompt_name, "Skipped (already exists)");
-                                    continue;
-                                } else if update {
-                                    // Check if source is newer than target
-                                    let source_modified = fs::metadata(&subpath)?.modified()?;
-                                    let target_modified = fs::metadata(&prompt_path)?.modified()?;
-
-                                    if source_modified <= target_modified {
-                                        result.add_skipped(
-                                            &prompt_name,
-                                            "Skipped (target is newer or same)",
-                                        );
-                                        continue;
-                                    }
-                                    // Continue with update since source is newer
-                                } else if !force {
-                                    result.add_skipped(&prompt_name, "Already exists");
-                                    continue;
-                                }
-                            }
-
-                            let content = fs::read_to_string(&subpath)?;
-                            let (metadata, body) =
-                                self.parse_content(&content, file_name, false)?;
-
-                            self.storage.write_prompt(&prompt_name, &metadata, &body)?;
-                            result.add_imported(&prompt_name);
-                        }
-                    }
+            };
+            if config.version != 1 || !config.verified {
+                for code in bindings.keys() {
+                    result.compatibility_skipped.push((
+                        code.clone(),
+                        "Existing compatibility file is unverified; it was preserved".into(),
+                    ));
                 }
+                return Ok(());
+            }
+            config.bindings
+        } else {
+            BTreeMap::new()
+        };
+        let mut pending = Vec::new();
+        for (code, target) in bindings {
+            let reason = if portability::validate_code(code).is_err()
+                || self.storage.prompt_path(target).is_err()
+            {
+                Some("Invalid compatibility identity or target")
+            } else if !available.contains_key(target) {
+                Some("Target was not imported under that exact name or verified identical")
+            } else if !dry_run
+                && !self
+                    .storage
+                    .read_raw(target)
+                    .is_ok_and(|bytes| Some(&bytes) == available.get(target))
+            {
+                Some("Target changed or became unavailable after import; choose the binding explicitly")
+            } else if existing.get(code).is_some_and(|old| old != target) {
+                Some("Existing compatibility target differs; choose the binding explicitly")
+            } else if code != target
+                && (available.contains_key(code)
+                    || self
+                        .storage
+                        .prompt_path(code)
+                        .is_ok_and(|path| path.exists()))
+            {
+                Some("An exact canonical prompt already owns that name")
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                result
+                    .compatibility_skipped
+                    .push((code.clone(), reason.into()));
+            } else if existing.get(code) != Some(target) {
+                existing.insert(code.clone(), target.clone());
+                pending.push(code.clone());
             }
         }
-
+        if pending.is_empty() {
+            return Ok(());
+        }
+        if dry_run {
+            result.compatibility_planned.extend(pending);
+            return Ok(());
+        }
+        let config = VerifiedCompatibility {
+            version: 1,
+            verified: true,
+            bindings: existing,
+        };
+        let bytes = toml::to_string_pretty(&config)?.into_bytes();
+        let root =
+            root.context("imported prompt store is unavailable for compatibility bindings")?;
+        let commit = (|| -> Result<()> {
+            if let Some(previous) = &previous {
+                let backups = root.child(OsStr::new(".metadata-backups"), true)?;
+                backups.write_atomic(
+                    OsStr::new(&format!("{}-compatibility.toml", uuid::Uuid::new_v4())),
+                    previous,
+                    false,
+                    None,
+                )?;
+            }
+            root.write_atomic(
+                OsStr::new(COMPATIBILITY_NAME),
+                &bytes,
+                previous.is_some(),
+                previous.as_deref(),
+            )
+        })();
+        match commit {
+            Ok(()) => result.compatibility_imported.extend(pending),
+            Err(error) => result.errors.push((
+                COMPATIBILITY_NAME.into(),
+                format!(
+                    "Prompts imported, but compatibility bindings were not committed: {error:#}"
+                ),
+            )),
+        }
         Ok(())
-    }
-
-    fn looks_like_prompt(&self, path: &Path) -> Result<bool> {
-        let content = fs::read_to_string(path)?;
-
-        // Check for prompt indicators
-        let indicators = [
-            "prompt",
-            "instruction",
-            "template",
-            "system:",
-            "user:",
-            "assistant:",
-            "{", // Has placeholders
-        ];
-
-        let content_lower = content.to_lowercase();
-        Ok(indicators
-            .iter()
-            .any(|&indicator| content_lower.contains(indicator)))
-    }
-
-    fn is_text_file(&self, path: &Path) -> Result<bool> {
-        let extensions = ["md", "txt", "prompt", "tmpl", "template"];
-
-        if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-            return Ok(extensions.contains(&ext.to_lowercase().as_str()));
-        }
-
-        // Check if file looks like text by reading first few bytes
-        let mut buffer = [0; 512];
-        if let Ok(mut file) = fs::File::open(path) {
-            use std::io::Read;
-            if let Ok(bytes_read) = file.read(&mut buffer) {
-                // Simple heuristic: if most bytes are printable ASCII, it's probably text
-                let printable_count = buffer[..bytes_read]
-                    .iter()
-                    .filter(|&&b| b.is_ascii_graphic() || b.is_ascii_whitespace())
-                    .count();
-
-                return Ok(printable_count as f32 / bytes_read as f32 > 0.8);
-            }
-        }
-
-        Ok(false)
     }
 }
 
-#[derive(Debug)]
+fn modified(path: &Path) -> Result<SystemTime> {
+    fs::metadata(path)?
+        .modified()
+        .with_context(|| format!("cannot read modification time for '{}'", path.display()))
+}
+fn file_stem(path: &Path) -> Result<String> {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::to_owned)
+        .context("source filename must be valid Unicode")
+}
+fn without_extension(path: &Path) -> Result<String> {
+    let mut value = path.to_path_buf();
+    value.set_extension("");
+    value
+        .to_str()
+        .map(|s| s.replace('\\', "/"))
+        .context("source filename must be valid Unicode")
+}
+fn is_text_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|s| s.to_str())
+        .is_some_and(|extension| {
+            ["md", "txt", "prompt", "tmpl", "template"]
+                .iter()
+                .any(|expected| extension.eq_ignore_ascii_case(expected))
+        })
+}
+fn is_legacy_store(path: &Path) -> bool {
+    ["prompts", "banks", "teams"]
+        .iter()
+        .any(|name| path.join(name).is_dir())
+}
+
+#[derive(Debug, Default)]
 pub struct ImportResult {
-    imported: Vec<String>,
-    skipped: Vec<(String, String)>,
-    errors: Vec<(String, String)>,
+    pub imported: Vec<String>,
+    pub planned: Vec<String>,
+    pub skipped: Vec<(String, String)>,
+    pub errors: Vec<(String, String)>,
+    pub compatibility_imported: Vec<String>,
+    pub compatibility_planned: Vec<String>,
+    pub compatibility_skipped: Vec<(String, String)>,
+    pub migration_report: Vec<String>,
+    pub dry_run: bool,
 }
 
 impl ImportResult {
-    fn new() -> Self {
-        Self {
-            imported: Vec::new(),
-            skipped: Vec::new(),
-            errors: Vec::new(),
-        }
+    pub fn has_errors(&self) -> bool {
+        !self.errors.is_empty()
     }
-
-    fn add_imported(&mut self, name: &str) {
-        self.imported.push(name.to_string());
-    }
-
-    fn add_skipped(&mut self, name: &str, reason: &str) {
-        self.skipped.push((name.to_string(), reason.to_string()));
-    }
-
-    fn add_error(&mut self, file: String, error: String) {
-        self.errors.push((file, error));
-    }
-
-    pub fn display(&self) {
-        println!("Import complete");
-
-        if !self.imported.is_empty() {
-            println!("  Imported: {}", self.imported.len());
-            for name in &self.imported {
-                println!("    {}", name);
-            }
-        }
-
-        if !self.skipped.is_empty() {
-            println!("  Skipped: {}", self.skipped.len());
-            for (name, reason) in &self.skipped {
-                println!("    {} ({})", name, reason);
-            }
-        }
-
-        if !self.errors.is_empty() {
-            println!("  Failed: {}", self.errors.len());
-            for (file, error) in &self.errors {
-                println!("    {} ({})", file, error);
-            }
-        }
-    }
-
     pub fn summary(&self) -> String {
-        format!(
-            "Imported: {}, Skipped: {}, Errors: {}",
-            self.imported.len(),
-            self.skipped.len(),
-            self.errors.len()
-        )
+        if self.dry_run {
+            format!(
+                "Would import: {}, Skipped: {}, Errors: {}",
+                self.planned.len(),
+                self.skipped.len(),
+                self.errors.len()
+            )
+        } else {
+            format!(
+                "Imported: {}, Skipped: {}, Errors: {}",
+                self.imported.len(),
+                self.skipped.len(),
+                self.errors.len()
+            )
+        }
+    }
+    pub fn display(&self) {
+        eprintln!("{}", self.summary());
+        for name in &self.planned {
+            eprintln!("  Would import {name}");
+        }
+        for name in &self.imported {
+            eprintln!("  Imported {name}");
+        }
+        for (name, reason) in &self.skipped {
+            eprintln!("  Skipped {name}: {reason}");
+        }
+        for (name, reason) in &self.errors {
+            eprintln!("  Failed {name}: {reason}");
+        }
+        for name in &self.compatibility_planned {
+            eprintln!("  Would retain compatibility code {name}");
+        }
+        for name in &self.compatibility_imported {
+            eprintln!("  Retained compatibility code {name}");
+        }
+        for (name, reason) in &self.compatibility_skipped {
+            eprintln!("  Skipped compatibility code {name}: {reason}");
+        }
+        for line in &self.migration_report {
+            eprintln!("  {line}");
+        }
     }
 }
 
@@ -618,28 +617,420 @@ impl ImportResult {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_clean_prompt_name() {
-        let storage = Storage::new().unwrap();
-        let importer = Importer::new(storage);
-
-        assert_eq!(importer.clean_prompt_name("My Prompt!"), "my-prompt");
-        assert_eq!(importer.clean_prompt_name("API Design"), "api-design");
-        assert_eq!(importer.clean_prompt_name("test_file.md"), "test_file-md");
+    fn storage(temp: &tempfile::TempDir, name: &str) -> Storage {
+        let storage = Storage::new_with_base(temp.path().join(name)).unwrap();
+        storage.init().unwrap();
+        storage
     }
 
     #[test]
-    fn test_extract_description() {
-        let storage = Storage::new().unwrap();
-        let importer = Importer::new(storage);
+    fn versioned_dry_run_reserves_destinations_and_matches_real_bindings() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir_all(source.join("prompts")).unwrap();
+        fs::write(source.join("prompts/a.md"), "First source").unwrap();
+        fs::write(source.join("prompts/a-v2.md"), "Second source").unwrap();
+        fs::write(
+            source.join("compatibility.toml"),
+            "version=1\nverified=true\n[bindings]\nv=\"a-v2\"\n",
+        )
+        .unwrap();
+        let destination = storage(&temp, "destination");
+        destination
+            .write_raw("a", b"Existing target", false)
+            .unwrap();
+        let importer = Importer::new(destination.clone());
+        let plan = importer
+            .import_with_options(
+                source.to_str().unwrap(),
+                None,
+                false,
+                true,
+                false,
+                false,
+                true,
+            )
+            .unwrap();
+        assert_eq!(plan.planned, vec!["a-v2", "a-v2-v2"]);
+        assert!(plan.compatibility_planned.is_empty());
+        assert!(!destination.prompt_path("a-v2").unwrap().exists());
+        let actual = importer
+            .import_with_options(
+                source.to_str().unwrap(),
+                None,
+                false,
+                true,
+                false,
+                false,
+                false,
+            )
+            .unwrap();
+        assert_eq!(actual.imported, plan.planned);
+        assert_eq!(actual.compatibility_imported, plan.compatibility_planned);
+        assert_eq!(destination.read_raw("a").unwrap(), b"Existing target");
+        assert_eq!(destination.read_raw("a-v2").unwrap(), b"First source");
+        assert_eq!(destination.read_raw("a-v2-v2").unwrap(), b"Second source");
+    }
 
-        let content = "# API Design\n\nThis is a prompt for designing APIs";
-        assert_eq!(importer.extract_description(content).unwrap(), "API Design");
+    #[test]
+    fn portable_note_round_trip_and_dry_run_preserve_all_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = storage(&temp, "source");
+        let note = b"---\nid: notes/idea\ndescription: Note\nunfamiliar: [one, two]\n---\n\n  Keep {input} literal here\n\n";
+        source.write_raw("notes/idea", note, false).unwrap();
+        let export = temp.path().join("export");
+        portability::export_store(&source, &export).unwrap();
+        let destination = storage(&temp, "destination");
+        let importer = Importer::new(destination.clone());
+        let plan = importer
+            .import_with_options(
+                export.to_str().unwrap(),
+                None,
+                false,
+                false,
+                false,
+                false,
+                true,
+            )
+            .unwrap();
+        assert!(plan.planned.contains(&"notes/idea".to_string()));
+        assert!(!destination.prompt_path("notes/idea").unwrap().exists());
+        let result = importer.import_from_path(export.to_str().unwrap()).unwrap();
+        assert!(!result.has_errors());
+        assert_eq!(destination.read_raw("notes/idea").unwrap(), note);
+    }
 
-        let content = "Design a REST API with the following requirements:";
+    #[test]
+    fn conflicting_and_versioned_targets_do_not_activate_dependent_bindings() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = storage(&temp, "source");
+        source.write_raw("work/review", b"Source A", false).unwrap();
+        fs::write(
+            source.base_dir().join(COMPATIBILITY_NAME),
+            "version=1\nverified=true\n[bindings]\ne=\"work/review\"\n",
+        )
+        .unwrap();
+        let export = temp.path().join("export");
+        portability::export_store(&source, &export).unwrap();
+        let destination = storage(&temp, "destination");
+        destination
+            .write_raw("work/review", b"Destination B", false)
+            .unwrap();
+        let importer = Importer::new(destination.clone());
+        let result = importer.import_from_path(export.to_str().unwrap()).unwrap();
+        assert!(!result.compatibility_skipped.is_empty());
+        assert!(!destination.base_dir().join(COMPATIBILITY_NAME).exists());
         assert_eq!(
-            importer.extract_description(content).unwrap(),
-            "Design a REST API with the following requirements:"
+            destination.read_raw("work/review").unwrap(),
+            b"Destination B"
         );
+        let versioned = importer
+            .import_with_options(
+                export.to_str().unwrap(),
+                None,
+                false,
+                true,
+                false,
+                false,
+                false,
+            )
+            .unwrap();
+        assert!(versioned.imported.contains(&"work/review-v2".into()));
+        assert!(!destination.base_dir().join(COMPATIBILITY_NAME).exists());
+        let forced = importer
+            .import_with_options(
+                export.to_str().unwrap(),
+                None,
+                true,
+                false,
+                false,
+                false,
+                false,
+            )
+            .unwrap();
+        assert!(!forced.has_errors());
+        assert_eq!(destination.read_raw("work/review").unwrap(), b"Source A");
+        assert_eq!(
+            portability::read_verified_compatibility(destination.base_dir())
+                .unwrap()
+                .get("e"),
+            Some(&"work/review".into())
+        );
+        assert!(!destination
+            .snapshot_paths("work/review")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn checksum_failure_validates_every_source_before_starting_import() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = storage(&temp, "source");
+        source.write_raw("a-good", b"Good note", false).unwrap();
+        source
+            .write_raw("z-tampered", b"Original note", false)
+            .unwrap();
+        let export = temp.path().join("export");
+        portability::export_store(&source, &export).unwrap();
+        fs::write(export.join("prompts/z-tampered.md"), "Changed after export").unwrap();
+        let destination = storage(&temp, "destination");
+        let error = Importer::new(destination.clone())
+            .import_from_path(export.to_str().unwrap())
+            .unwrap_err();
+        assert!(error.to_string().contains("checksum mismatch"));
+        assert!(!destination.prompt_path("a-good").unwrap().exists());
+        assert!(!destination.prompt_path("z-tampered").unwrap().exists());
+    }
+
+    #[test]
+    fn dry_run_into_absent_store_never_creates_the_store_or_bindings() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = storage(&temp, "source");
+        source.write_raw("work/review", b"Review", false).unwrap();
+        fs::write(
+            source.base_dir().join(COMPATIBILITY_NAME),
+            "version=1\nverified=true\n[bindings]\ne=\"work/review\"\n",
+        )
+        .unwrap();
+        let export = temp.path().join("export");
+        portability::export_store(&source, &export).unwrap();
+        let destination = Storage::new_with_base(temp.path().join("absent")).unwrap();
+        let result = Importer::new(destination.clone())
+            .import_with_options(
+                export.to_str().unwrap(),
+                None,
+                false,
+                false,
+                false,
+                false,
+                true,
+            )
+            .unwrap();
+        assert_eq!(result.planned.len(), source.list_prompts().unwrap().len());
+        assert_eq!(result.compatibility_planned, vec!["e".to_string()]);
+        assert!(!destination.base_dir().exists());
+    }
+
+    #[test]
+    fn legacy_plain_bank_and_cached_team_notes_and_verified_bindings_are_preserved() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("old-store");
+        fs::create_dir_all(source.join("prompts")).unwrap();
+        fs::create_dir_all(source.join("banks/notes")).unwrap();
+        fs::create_dir_all(source.join("teams/shared")).unwrap();
+        let plain = b"  Plain note\n\n";
+        let bank = b"---\nid: notes/idea\ncustom: keep\n---\n\nBank note\n";
+        let team = b"Cached team note\n\n";
+        fs::write(source.join("prompts/todo.md"), plain).unwrap();
+        fs::write(source.join("banks/notes/idea.md"), bank).unwrap();
+        fs::write(source.join("teams/shared/check.md"), team).unwrap();
+        fs::write(source.join("config.toml"), "token='keep-private'").unwrap();
+        fs::write(
+            source.join(COMPATIBILITY_NAME),
+            "version=1\nverified=true\n[bindings]\ne=\"notes/idea\"\n",
+        )
+        .unwrap();
+        let destination = storage(&temp, "destination");
+        let result = Importer::new(destination.clone())
+            .import_from_path(source.to_str().unwrap())
+            .unwrap();
+        assert!(!result.has_errors());
+        assert_eq!(destination.read_raw("todo").unwrap(), plain);
+        assert_eq!(destination.read_raw("notes/idea").unwrap(), bank);
+        assert_eq!(destination.read_raw("@shared/check").unwrap(), team);
+        assert!(!destination.base_dir().join("config.toml").exists());
+        assert_eq!(result.compatibility_imported, vec!["e".to_string()]);
+        assert_eq!(fs::read(source.join("banks/notes/idea.md")).unwrap(), bank);
+    }
+
+    #[test]
+    fn identical_target_can_activate_binding_but_unknown_existing_config_is_preserved() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = storage(&temp, "source");
+        source
+            .write_raw("work/review", b"Same note", false)
+            .unwrap();
+        fs::write(
+            source.base_dir().join(COMPATIBILITY_NAME),
+            "version=1\nverified=true\n[bindings]\ne=\"work/review\"\n",
+        )
+        .unwrap();
+        let export = temp.path().join("export");
+        portability::export_store(&source, &export).unwrap();
+        let destination = storage(&temp, "destination");
+        destination
+            .write_raw("work/review", b"Same note", false)
+            .unwrap();
+        let importer = Importer::new(destination.clone());
+        let identical = importer.import_from_path(export.to_str().unwrap()).unwrap();
+        assert_eq!(identical.compatibility_imported, vec!["e".to_string()]);
+        let config =
+            b"version=1\nverified=true\nfuture_field='preserve'\n[bindings]\nother='work/review'\n";
+        fs::write(destination.base_dir().join(COMPATIBILITY_NAME), config).unwrap();
+        let result = importer.import_from_path(export.to_str().unwrap()).unwrap();
+        assert!(result.compatibility_imported.is_empty());
+        assert!(!result.compatibility_skipped.is_empty());
+        assert_eq!(
+            fs::read(destination.base_dir().join(COMPATIBILITY_NAME)).unwrap(),
+            config
+        );
+    }
+
+    #[test]
+    fn deleted_identity_requires_explicit_restore_or_a_new_version_in_dry_run_too() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = storage(&temp, "destination");
+        destination
+            .write_raw("note", b"Deleted note", false)
+            .unwrap();
+        destination.delete_prompt("note").unwrap();
+        let source = temp.path().join("note.md");
+        fs::write(&source, "Restored note").unwrap();
+        let importer = Importer::new(destination.clone());
+        let plan = importer
+            .import_with_options(
+                source.to_str().unwrap(),
+                None,
+                false,
+                false,
+                false,
+                false,
+                true,
+            )
+            .unwrap();
+        assert!(plan.has_errors());
+        assert!(!destination.prompt_path("note").unwrap().exists());
+        let versioned = importer
+            .import_with_options(
+                source.to_str().unwrap(),
+                None,
+                false,
+                true,
+                false,
+                false,
+                false,
+            )
+            .unwrap();
+        assert_eq!(versioned.imported, vec!["note-v2".to_string()]);
+        let forced = importer
+            .import_with_options(
+                source.to_str().unwrap(),
+                None,
+                true,
+                false,
+                false,
+                false,
+                false,
+            )
+            .unwrap();
+        assert!(!forced.has_errors());
+        assert_eq!(destination.read_raw("note").unwrap(), b"Restored note");
+        assert!(!destination.snapshot_paths("note").unwrap().is_empty());
+    }
+
+    #[test]
+    fn legacy_snapshot_directories_are_not_imported_as_live_prompts_and_source_is_retained() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("old-store");
+        fs::create_dir_all(source.join("prompts")).unwrap();
+        fs::create_dir_all(source.join("banks/work")).unwrap();
+        fs::write(source.join("prompts/note.md"), "Current note").unwrap();
+        fs::write(source.join("banks/work/review.md"), "Current review").unwrap();
+        let recovery_paths = [
+            "prompts/note.versions/v1.md",
+            "banks/work/review.versions/v1.md",
+            "banks/work/work/review.versions/v0.md",
+            ".versions/prompts/note/raw.md",
+        ];
+        for path in &recovery_paths {
+            let file = source.join(path);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, format!("Recovery bytes for {path}\n\n")).unwrap();
+        }
+        let destination = storage(&temp, "destination");
+        let importer = Importer::new(destination.clone());
+        let plan = importer
+            .import_with_options(
+                source.to_str().unwrap(),
+                None,
+                false,
+                false,
+                false,
+                false,
+                true,
+            )
+            .unwrap();
+        assert!(!plan.has_errors());
+        assert_eq!(
+            plan.planned,
+            vec!["note".to_string(), "work/review".to_string()]
+        );
+        assert!(plan
+            .migration_report
+            .iter()
+            .any(|line| line.contains("live prompts only")));
+        assert!(!destination.prompt_path("note").unwrap().exists());
+        let result = importer.import_from_path(source.to_str().unwrap()).unwrap();
+        assert!(!result.has_errors());
+        assert_eq!(
+            result.imported,
+            vec!["note".to_string(), "work/review".to_string()]
+        );
+        assert!(result
+            .migration_report
+            .iter()
+            .any(|line| line.contains("copy the whole source directory")));
+        assert_eq!(destination.read_raw("note").unwrap(), b"Current note");
+        assert!(destination.snapshot_paths("note").unwrap().is_empty());
+        assert!(destination
+            .snapshot_paths("work/review")
+            .unwrap()
+            .is_empty());
+        for path in &recovery_paths {
+            assert_eq!(
+                fs::read(source.join(path)).unwrap(),
+                format!("Recovery bytes for {path}\n\n").as_bytes()
+            );
+        }
+        let bank_destination = storage(&temp, "bank-destination");
+        let bank_importer = Importer::new(bank_destination.clone());
+        let bank = source.join("banks/work");
+        let plan = bank_importer
+            .import_with_options(
+                bank.to_str().unwrap(),
+                None,
+                false,
+                false,
+                false,
+                false,
+                true,
+            )
+            .unwrap();
+        assert_eq!(plan.planned, vec!["work/review".to_string()]);
+        let result = bank_importer
+            .import_from_path(bank.to_str().unwrap())
+            .unwrap();
+        assert!(!result.has_errors());
+        assert_eq!(result.imported, vec!["work/review".to_string()]);
+        assert_eq!(
+            bank_destination.read_raw("work/review").unwrap(),
+            b"Current review"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn imported_symlink_is_rejected_without_any_prompt_write() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let destination = storage(&temp, "destination");
+        let source = temp.path().join("loose");
+        fs::create_dir(&source).unwrap();
+        fs::write(temp.path().join("external.md"), "Private source").unwrap();
+        symlink(temp.path().join("external.md"), source.join("linked.md")).unwrap();
+        assert!(Importer::new(destination.clone())
+            .import_from_path(source.to_str().unwrap())
+            .is_err());
+        assert!(!destination.prompt_path("linked").unwrap().exists());
     }
 }

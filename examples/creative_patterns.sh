@@ -1,133 +1,72 @@
-#!/bin/bash
-# PromptHive Creative Usage Patterns Examples
+#!/usr/bin/env bash
+# Local-only demonstration. All prompt data stays in a disposable directory.
+set -euo pipefail
 
-echo "=== PromptHive Creative Patterns Demo ==="
-echo
+ph_binary=${PROMPTHIVE_BIN:-ph}
+if ! command -v "$ph_binary" >/dev/null 2>&1; then
+  printf 'Cannot find ph. Set PROMPTHIVE_BIN to the candidate binary.\n' >&2
+  exit 1
+fi
 
-# Set up
-PH="./target/release/ph"
-export PROMPTHIVE_LOG_LEVEL=error  # Quiet mode for demo
+demo_dir=$(mktemp -d "${TMPDIR:-/tmp}/ph-examples.XXXXXXXX")
+cleanup() {
+  rm -rf -- "$demo_dir"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+export PROMPTHIVE_BASE_DIR="$demo_dir/store"
+export XDG_CONFIG_HOME="$demo_dir/config"
+mkdir -p "$PROMPTHIVE_BASE_DIR" "$XDG_CONFIG_HOME"
 
-# 1. Daily Journaling
-echo "1. Creating journal prompts..."
-$PH new journal/daily "Date: {date}
+printf 'Prompthive local examples (temporary library)\n\n'
 
-Today I learned: " -q
-$PH new journal/gratitude "Three things I'm grateful for:
-1. " -q
-echo "✓ Journal prompts created"
-echo
+"$ph_binary" n study/explain 'Explain this in plain language: {input}' -q >/dev/null
+"$ph_binary" n work/rules 'Use concrete examples. Keep the answer brief.' -q >/dev/null
+"$ph_binary" n work/review 'Review this material for concrete defects: {input}' -q >/dev/null
+printf '%s\n' 'Design meeting: preserve the original notes.' |
+  "$ph_binary" n notes/meeting -q >/dev/null
 
-# 2. Study Assistant
-echo "2. Creating study prompts..."
-$PH new study/explain "Explain {input} like I'm 5:
+printf '1. Find saved text by its full name\n'
+"$ph_binary" f work
+printf '\n2. Reuse a template with literal input\n'
+"$ph_binary" u study/explain 'Rust ownership' -q
+printf '\n\n3. Chain two prompts with piped context\n'
+printf '%s' 'A small code change' | "$ph_binary" c work/rules,work/review -q
+printf '\n\n4. Read notes and save a separate copy\n'
+"$ph_binary" s notes/meeting -s notes/meeting-copy -q >/dev/null
+"$ph_binary" r notes/meeting-copy notes/meeting-archive >/dev/null
+"$ph_binary" s notes/meeting-archive -q
 
-Simple explanation: " -q
-$PH new study/test "Create 5 quiz questions about: {input}
+# Optional YAML declares variables. This fixture is an ordinary Markdown file.
+mkdir -p "$PROMPTHIVE_BASE_DIR/banks/work"
+cat > "$PROMPTHIVE_BASE_DIR/banks/work/explain.md" <<'PROMPT'
+---
+id: work/explain
+description: Explain a change
+vars: {language: null, tone: brief}
+---
 
-Questions:
-1. " -q
-echo "✓ Study prompts created"
-echo
+Explain this {language} change in a {tone} tone: {input}
+PROMPT
+printf '\n5. Supply declared variables\n'
+printf '%s' 'A parser correction' |
+  "$ph_binary" u work/explain -v language=Rust -v tone=direct -q
 
-# 3. Work Templates
-echo "3. Creating work templates..."
-$PH new work/email-followup "Subject: Follow-up from our {date} meeting
+printf '\n6. Take a local version and restore it\n'
+"$ph_binary" version notes/meeting before-append -m 'Original note' >/dev/null
+"$ph_binary" s notes/meeting-archive -a notes/meeting -q >/dev/null
+"$ph_binary" rollback notes/meeting before-append >/dev/null
+"$ph_binary" s notes/meeting -q > "$demo_dir/original.txt"
+printf '%s\n' 'Design meeting: preserve the original notes.' > "$demo_dir/expected.txt"
+cmp "$demo_dir/expected.txt" "$demo_dir/original.txt"
 
-Hi {name},
-
-Thank you for " -q
-$PH new work/1-on-1 "1-on-1 with {manager}
-
-Agenda:
-- Career development
-- Current projects
-- Feedback
-
-Notes: " -q
-echo "✓ Work templates created"
-echo
-
-# 4. Creative Writing
-echo "4. Creating writing helpers..."
-$PH new write/character "Create a character profile:
-Name: {input}
-Traits: " -q
-$PH new write/blog-outline "Blog post about: {input}
-
-Outline with sections:
-1. Introduction
-2. " -q
-echo "✓ Writing prompts created"
-echo
-
-# 5. DevOps Templates
-echo "5. Creating DevOps runbooks..."
-$PH new ops/incident "Incident: {title}
-Severity: 
-Impact: 
-Mitigation: " -q
-$PH new ops/deploy-checklist "Deploy {service} to {env}
-
-[ ] Tests pass
-[ ] Migrations run
-[ ] Monitoring updated
-[ ] Rollback plan" -q
-echo "✓ DevOps templates created"
-echo
-
-# 6. Data Analysis
-echo "6. Creating data analysis templates..."
-$PH new data/hypothesis "Hypothesis: {input}
-
-Test with: 
-Expected outcome: " -q
-$PH new data/findings "Analysis of: {dataset}
-
-Key findings: 
-Limitations: 
-Next steps: " -q
-echo "✓ Data analysis templates created"
-echo
-
-# 7. Personal Productivity
-echo "7. Creating productivity tools..."
-$PH new life/decision "Decision: {input}
-
-Pros:
-- 
-
-Cons:
-- 
-
-Alternatives:
-- " -q
-$PH new life/goals "Goal: {input}
-
-Why it matters: 
-Success criteria: 
-First step: " -q
-echo "✓ Productivity prompts created"
-echo
-
-# Demo usage
-echo "=== Example Usage ==="
-echo
-echo "Journal entry:"
-$PH use journal/daily -q
-echo
-echo "Study helper:"
-echo "quantum physics" | $PH use study/explain -q
-echo
-echo "Work template:"
-$PH use work/1-on-1 -q | head -n 5
-echo "..."
-echo
-
-echo "=== All Creative Prompts ==="
-$PH ls | grep -E "journal/|study/|work/|write/|ops/|data/|life/"
-echo
-
-echo "=== Demo Complete ==="
-echo "Try: claude \"\$(ph use journal/daily)\""
-echo "Or:  ph use life/decision \"Accept new job offer\" | claude -p"
+printf '\n7. Export, preview an import, and verify a restored copy\n'
+"$ph_binary" export "$demo_dir/export" >/dev/null
+mkdir "$demo_dir/restored"
+PROMPTHIVE_BASE_DIR="$demo_dir/restored" "$ph_binary" import "$demo_dir/export" --dry-run >/dev/null
+PROMPTHIVE_BASE_DIR="$demo_dir/restored" "$ph_binary" import "$demo_dir/export" >/dev/null
+PROMPTHIVE_BASE_DIR="$demo_dir/restored" "$ph_binary" s notes/meeting -q > "$demo_dir/restored.txt"
+cmp "$demo_dir/original.txt" "$demo_dir/restored.txt"
+printf 'The restored note matches the original bytes.\n'
+printf '\nDone. The temporary library and export are removed on exit.\n'
