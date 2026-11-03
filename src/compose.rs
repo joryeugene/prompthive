@@ -19,7 +19,9 @@ struct Source {
 
 /// Paths are explicit; a dotted prompt ID is still a prompt ID.
 pub fn is_explicit_file(name: &str) -> bool {
-    name.starts_with("./")
+    std::path::Path::new(name).is_absolute()
+        || (cfg!(windows) && (name.starts_with(".\\") || name.starts_with("..\\")))
+        || name.starts_with("./")
         || name.starts_with("../")
         || name.starts_with('/')
         || name.starts_with('~')

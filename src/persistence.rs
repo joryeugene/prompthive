@@ -73,7 +73,7 @@ impl Directory {
                     continue;
                 }
                 match fs::symlink_metadata(&current) {
-                    Ok(meta) if meta.file_type().is_symlink() => {
+                    Ok(meta) if is_link(&meta) => {
                         bail!("symlink directory is not allowed: {}", current.display())
                     }
                     Ok(meta) if !meta.is_dir() => bail!("not a directory: {}", current.display()),
@@ -291,7 +291,7 @@ impl Directory {
         };
         #[cfg(not(unix))]
         let file = {
-            if fs::symlink_metadata(&path)?.file_type().is_symlink() {
+            if is_link(&fs::symlink_metadata(&path)?) {
                 bail!("symlink file is not allowed: {}", path.display());
             }
             File::open(&path)?
@@ -300,7 +300,20 @@ impl Directory {
     }
 
     pub(crate) fn metadata(&self, name: &std::ffi::OsStr) -> Result<Metadata> {
-        Ok(self.open_entry(name)?.metadata()?)
+        #[cfg(unix)]
+        {
+            Ok(self.open_entry(name)?.metadata()?)
+        }
+        #[cfg(not(unix))]
+        {
+            check_leaf(name)?;
+            let path = self.path.join(name);
+            let metadata = fs::symlink_metadata(&path)?;
+            if is_link(&metadata) {
+                bail!("linked entry is not allowed: {}", path.display());
+            }
+            Ok(metadata)
+        }
     }
 
     pub(crate) fn open_file(&self, name: &std::ffi::OsStr) -> Result<File> {
@@ -539,6 +552,20 @@ impl Directory {
     }
 }
 
+#[cfg(not(unix))]
+fn is_link(metadata: &Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // Reject junctions and other reparse points as well as symbolic links.
+        metadata.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
 fn ensure_unchanged(
     path: &Path,
     old: &Option<(Vec<u8>, Metadata)>,
@@ -751,6 +778,37 @@ mod boundary_tests {
             directory.read(std::ffi::OsStr::new("note.md")).unwrap().0,
             b"complete"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_directory_metadata_is_readable_and_junctions_are_rejected() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temporary.path()).unwrap();
+        fs::create_dir(root.join("folder")).unwrap();
+        fs::create_dir(root.join("outside")).unwrap();
+        let directory = Directory::open(&root, false).unwrap();
+        assert!(directory
+            .metadata(std::ffi::OsStr::new("folder"))
+            .unwrap()
+            .is_dir());
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(root.join("junction"))
+            .arg(root.join("outside"))
+            .output()
+            .unwrap();
+        assert!(
+            status.status.success(),
+            "could not create test junction: {:?}",
+            status
+        );
+        assert!(directory
+            .metadata(std::ffi::OsStr::new("junction"))
+            .is_err());
+        assert!(directory
+            .child(std::ffi::OsStr::new("junction"), false)
+            .is_err());
     }
 
     #[test]

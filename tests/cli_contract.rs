@@ -495,13 +495,26 @@ fn unicode_and_case_sensitive_canonical_names_stay_distinct() {
     let fixture = Fixture::new();
     fixture.success(&["n", "notes/解释", "解释这段文字", "-q"], b"");
     fixture.prompt("Review", "Upper case");
-    fixture.prompt("review", "Lower case");
-    for (id, body) in [
-        ("notes/解释", "解释这段文字"),
-        ("Review", "Upper case"),
-        ("review", "Lower case"),
-    ] {
-        assert_eq!(fixture.success(&["u", id], b"").stdout, body.as_bytes());
+    assert_eq!(
+        fixture.success(&["u", "notes/解释"], b"").stdout,
+        "解释这段文字".as_bytes()
+    );
+    assert_eq!(fixture.success(&["u", "Review"], b"").stdout, b"Upper case");
+    if fixture.path("review").exists() {
+        // This filesystem aliases case-only names. Prove that the CLI does not
+        // silently select that alias, or overwrite the existing prompt.
+        assert_eq!(
+            fs::read(fixture.path("review")).unwrap(),
+            fs::read(fixture.path("Review")).unwrap()
+        );
+        fixture.fail(&["u", "review"], b"", 2);
+        let refusal = fixture.run(&["n", "review", "Lower case", "-q"], b"");
+        assert!(!refusal.status.success());
+        assert_eq!(fixture.success(&["u", "Review"], b"").stdout, b"Upper case");
+    } else {
+        fixture.prompt("review", "Lower case");
+        assert_eq!(fixture.success(&["u", "review"], b"").stdout, b"Lower case");
+        assert_eq!(fixture.success(&["u", "Review"], b"").stdout, b"Upper case");
     }
     fixture.fail(&["u", "REVIEW"], b"", 2);
 }

@@ -238,6 +238,21 @@ impl Storage {
         let parts: Vec<_> = relative.components().collect();
         for (index, part) in parts.iter().enumerate() {
             let name = part.as_os_str();
+            // Filesystems may resolve a differently cased path to an existing
+            // file. Canonical selectors must still use the stored spelling.
+            if !directory.entries()?.iter().any(|entry| entry == name) {
+                match directory.metadata(name) {
+                    Ok(_) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::NotFound,
+                            format!("no exact stored spelling for {}", path.display()),
+                        )
+                        .into())
+                    }
+                    Err(error) if is_missing(&error) => {}
+                    Err(error) => return Err(error),
+                }
+            }
             if index + 1 == parts.len() {
                 match directory.metadata(name) {
                     Ok(meta) if !meta.is_file() => bail!("not a regular file: {}", path.display()),
