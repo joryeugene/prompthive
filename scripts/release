@@ -9,7 +9,7 @@ if [[ $# -gt 1 || ( "$mode" != --check && "$mode" != --publish ) ]]; then
 fi
 .workflow/check-release --stage local
 bash scripts/check
-cargo package --locked
+bash scripts/test-installed
 if [[ "$mode" == --publish ]]; then
   cargo publish --locked
 fi

@@ -35,6 +35,8 @@ jobs:
         run: cargo fetch --locked
       - name: Check the core and disposable CLI examples offline
         run: bash scripts/check
+      - name: Install and exercise the actual default and headless packages offline
+        run: bash scripts/test-installed
 
   msrv:
     name: Declared minimum Rust version

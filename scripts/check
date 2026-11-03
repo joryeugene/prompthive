@@ -22,3 +22,8 @@ if [[ ! -f "$candidate" && -f "$candidate.exe" ]]; then
   candidate="$candidate.exe"
 fi
 PROMPTHIVE_BIN="$candidate" bash examples/creative_patterns.sh
+bash scripts/test-pipes "$candidate"
+cargo build --locked --offline --bin ph --no-default-features
+bash scripts/test-pipes "$candidate" --headless
+# Leave the regular development executable in its default feature configuration.
+cargo build --locked --offline --bin ph

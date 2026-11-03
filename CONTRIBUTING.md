@@ -37,6 +37,16 @@ cargo test --locked --no-default-features --test cli_contract
 
 The suite covers command aliases, exact resolution, literal templates, variables, composition, headless behavior, destinations, legacy notes, version recovery, portable import/export conflicts, and path containment. Unix-specific cases cover symlinks, staged editor failures and conflicts, and a downstream closed pipe. Unit tests provide the lower-level persistence and rendering checks.
 
+Run real Bash pipelines against an installed executable with one command:
+
+```sh
+bash scripts/test-pipes "$(command -v ph)"
+```
+
+Or give the exact build path, for example `bash scripts/test-pipes ./target/debug/ph`. Add `--headless` only when testing an executable built without the terminal picker. `--report result.json` saves the executable hash, commands, output bytes, exit codes, and explicit platform exceptions. Every case has a timeout and uses disposable prompt/configuration directories; the real store and clipboard are never used. The contract covers Unicode and whitespace, use/composition, defaults and supplied values, literal inserted text, save/redirect destinations, validation failures, non-TTY behavior, a closed downstream pipe, and Unix piped-context cancellation with terminal restoration.
+
+`bash scripts/test-installed` packages the locked source, extracts that actual Cargo archive, installs default and headless executables into temporary roots, checks their versions, and runs the same pipe contract. It respects `CARGO_TARGET_DIR` for packaging and keeps install builds in its `installed-contract` subdirectory. Temporary installed files are removed after verification; `--report installed.json` retains package and executable hashes with the observations. A clean checkout is required by Cargo packaging. Bash, Python 3, and the Rust toolchain are test dependencies, not product runtime dependencies. Native Windows PTY cancellation and physical desktop clipboard behavior need separate evidence.
+
 Automated headless checks do not prove picker readability, keyboard behavior, terminal restoration, a real clipboard paste, or durability across a power interruption. Record those checks separately on the platform being claimed. Compare the five journeys in [the comeback specification](docs/comeback-spec.md) with the same fixtures and terminal state. Count all selection and confirmation keys before making speed claims.
 
 ## Preserve the library
@@ -53,4 +63,4 @@ For a bug report, include the operating system, `ph --version`, an isolated repr
 
 ## Release preparation
 
-Run `cargo fetch --locked`, then `bash scripts/check` for the portable offline suite. Normal release preparation is `bash scripts/release --check`. It invokes `.workflow/check-release --stage local` before Cargo release work; missing or stale workspace acceptance refuses the operation. See [.workflow/README.md](.workflow/README.md) for the private evidence location and the safe CI sentinel. Publishing requires reviewed scope approval and the same gate. No release is published by the check mode.
+Run `cargo fetch --locked`, then `bash scripts/check` for the portable offline suite. It exercises both feature builds through real Bash pipes. Normal release preparation is `bash scripts/release --check`. It invokes `.workflow/check-release --stage local` before Cargo release work; missing or stale workspace acceptance refuses the operation, then the checked source is packaged, installed, and tested in both feature modes. See [.workflow/README.md](.workflow/README.md) for the private evidence location and the safe CI sentinel. CI also runs `bash scripts/test-installed`. Publishing requires reviewed scope approval and the same gate. No release is published by the check mode.
