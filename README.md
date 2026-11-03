@@ -68,7 +68,7 @@ git diff | ph u review -c           # Explicit clipboard copy
 git diff | ph c work/rules,review --clipboard
 ```
 
-`-c` means copy on use/show/new/clean. Compose uses `--clipboard`; diff keeps `-c` for context and `-f` for format. `-q` never suppresses errors. Exit codes distinguish validation or lookup errors (`2`), an editor conflict (`3`), explicit clipboard failure (`4`), and cancellation (`130`).
+`-c` means copy on use/show/new/clean and the retained list/find destinations. Compose uses `--clipboard`; diff keeps `-c` for context and `-f` for format. `-q` never suppresses errors. Exit codes distinguish validation or lookup errors (`2`), an editor conflict (`3`), explicit clipboard failure (`4`), and cancellation (`130`).
 
 ## Templates and composition
 

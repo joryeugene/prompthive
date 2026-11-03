@@ -172,16 +172,20 @@ pub fn run(command: Option<Commands>) -> Result<()> {
             storage.init()?;let name=resolve_prompt_name(&storage,&name)?;
             crate::edit::edit_prompt(&storage,&name)?;eprintln!("Saved {name}.");Ok(())
         }
-        Commands::Ls{}=>{
-            if std::io::stdout().is_terminal() {
-                let prompts=readable_prompts(&storage)?;
-                write_stdout(&prompts.iter().map(|p|format!("{}  {}\n",p.name,terminal_description(&p.description))).collect::<String>())
-            } else {let names=storage.list_prompts()?;write_stdout(&names.iter().map(|n|format!("{n}\n")).collect::<String>())}
+        Commands::Ls{clipboard,destination}=>{
+            let io=IoOptions::new(destination,clipboard)?;
+            let explicit=io.clipboard || io.destination.save.is_some() || io.destination.append.is_some() || io.destination.file.is_some();
+            let text=if std::io::stdout().is_terminal() && !explicit && !io.destination.quiet {
+                readable_prompts(&storage)?.iter().map(|p|format!("{}  {}\n",p.name,terminal_description(&p.description))).collect::<String>()
+            } else {storage.list_prompts()?.iter().map(|n|format!("{n}\n")).collect::<String>()};
+            if explicit {io.emit(&storage,&text,"prompts",None)} else {write_stdout(&text)}
         }
-        Commands::Find{query}=>{
+        Commands::Find{query,clipboard,destination}=>{
+            let io=IoOptions::new(destination,clipboard)?;
+            let explicit=io.clipboard || io.destination.save.is_some() || io.destination.append.is_some() || io.destination.file.is_some();
             let prompts=matching::ranked_prompts(&query,&readable_prompts(&storage)?);
-            let text=prompts.iter().map(|p|if std::io::stdout().is_terminal(){format!("{}  {}\n",p.name,terminal_description(&p.description))}else{format!("{}\n",p.name)}).collect::<String>();
-            write_stdout(&text)
+            let text=prompts.iter().map(|p|if std::io::stdout().is_terminal() && !explicit && !io.destination.quiet {format!("{}  {}\n",p.name,terminal_description(&p.description))}else{format!("{}\n",p.name)}).collect::<String>();
+            if explicit {io.emit(&storage,&text,"matches",None)} else {write_stdout(&text)}
         }
         Commands::Rename{old_name,new_name}=>{
             Storage::validate_name(&new_name).map_err(usage)?;

@@ -1256,6 +1256,8 @@ printf '%s\n' "${COMPREPLY[@]}"
         (vec!["ph", "c", "base,rev"], vec!["base,review"]),
         (vec!["ph", "diff", "other", "rev"], vec!["review"]),
         (vec!["ph", "s", "source", "-a", "rev"], vec!["review"]),
+        (vec!["ph", "l", "-a", "rev"], vec!["review"]),
+        (vec!["ph", "f", "rev", "-a", "rev"], vec!["review"]),
         (vec!["ph", "r", "other", "rev"], vec![]),
         (vec!["ph", "use", "review", "rev"], vec![]),
         (vec!["ph", "n", "rev"], vec![]),
@@ -1359,4 +1361,39 @@ fn downstream_closed_pipe_is_quiet() {
             || output.status.signal() == Some(13)
             || output.status.code() == Some(141)
     );
+}
+
+#[test]
+fn listing_and_discovery_keep_their_explicit_destinations() {
+    let fixture = Fixture::new();
+    fixture.prompt("review", "Review {input}");
+    let output = fixture.temporary.path().join("names.txt");
+    assert!(fixture
+        .success(&["l", "-f", output.to_str().unwrap(), "-q"], b"")
+        .stdout
+        .is_empty());
+    assert_eq!(fs::read(&output).unwrap(), b"review\n");
+    fixture.success(&["f", "rev", "-s", "notes/names", "-q"], b"");
+    assert_eq!(
+        fixture.success(&["s", "notes/names", "-q"], b"").stdout,
+        b"review\n"
+    );
+    fixture.fail(
+        &[
+            "f",
+            "rev",
+            "-s",
+            "notes/never",
+            "-f",
+            output.to_str().unwrap(),
+        ],
+        b"",
+        2,
+    );
+    assert!(!fixture.path("notes/never").exists());
+    #[cfg(target_os = "linux")]
+    {
+        fixture.fail(&["l", "-c"], b"", 4);
+        fixture.fail(&["f", "rev", "-c", "-q"], b"", 4);
+    }
 }

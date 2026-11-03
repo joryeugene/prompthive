@@ -43,7 +43,7 @@ _ph_selector_position() {
     done
     if [[ -n $expecting ]]; then
         case "$action:$expecting" in
-            u:-a|use:-a|s:-a|show:-a|n:-a|new:-a|c:-a|compose:-a|chain:-a|x:-a|clean:-a) printf name; return 0 ;;
+            u:-a|use:-a|s:-a|show:-a|n:-a|new:-a|c:-a|compose:-a|chain:-a|x:-a|clean:-a|l:-a|ls:-a|list:-a|f:-a|find:-a) printf name; return 0 ;;
             *) return 1 ;;
         esac
     fi
@@ -92,7 +92,7 @@ _ph_selector_position() {
     done
     if [[ -n $expecting ]]; then
         case "$action:$expecting" in
-            u:-a|use:-a|s:-a|show:-a|n:-a|new:-a|c:-a|compose:-a|chain:-a|x:-a|clean:-a) print -r -- name; return 0 ;;
+            u:-a|use:-a|s:-a|show:-a|n:-a|new:-a|c:-a|compose:-a|chain:-a|x:-a|clean:-a|l:-a|ls:-a|list:-a|f:-a|find:-a) print -r -- name; return 0 ;;
             *) return 1 ;;
         esac
     fi
@@ -149,7 +149,7 @@ function __ph_selector_position
         end
     end
     if test -n "$expecting"
-        contains -- $action u use s show n new c compose chain x clean; and test "$expecting" = -a; and return 0
+        contains -- $action u use s show n new c compose chain x clean l ls list f find; and test "$expecting" = -a; and return 0
         return 1
     end
     switch $action

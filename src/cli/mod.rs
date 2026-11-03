@@ -73,10 +73,21 @@ pub enum Commands {
     Edit { name: String },
     /// Find prompts by name or description
     #[command(visible_alias = "f")]
-    Find { query: String },
+    Find {
+        query: String,
+        #[arg(short = 'c', long)]
+        clipboard: bool,
+        #[command(flatten)]
+        destination: Destinations,
+    },
     /// List canonical prompt names
     #[command(visible_aliases=["l","list"])]
-    Ls {},
+    Ls {
+        #[arg(short = 'c', long)]
+        clipboard: bool,
+        #[command(flatten)]
+        destination: Destinations,
+    },
     /// Compose prompts left to right
     #[command(visible_aliases=["c","chain"])]
     Compose {
