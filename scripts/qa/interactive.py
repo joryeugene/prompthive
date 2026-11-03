@@ -27,6 +27,8 @@ def case(name):
                    'broken':'---\nbad: [\n---\nOld malformed note',
                    'env_fail':'---\nvars: {topic: null}\n---\nFail {env:PROMPTHIVE_QA_MISSING_ENV_0V4} {topic}'}
         for id,body in templates.items(): (store/'prompts'/f'{id}.md').write_text(body,encoding='utf-8')
+        if name=='with_directives':
+            (store/'prompts/directive.md').write_text('---\nvars: {policy: null}\n---\nRULE [{policy}]',encoding='utf-8')
         long_name='work/'+('identity-'*7)+'longform'
         if name=='long_identity':
             path=store/'banks'/(long_name+'.md');path.parent.mkdir(parents=True);path.write_text(templates['explain'])
@@ -60,6 +62,11 @@ def case(name):
         if name=='frozen_context':query='clock'
         if name=='render_failure':query='env_fail';expected_code=2
         if name=='long_identity':query='longform'
+        terminal_payload=name in ['bare_guided','t_guided']
+        if name=='bare_guided':args=[]
+        if name=='t_guided':args=['t','exp'];query=''
+        if name=='unknown_picker':args=['u','exp','-f','result.txt'];query=''
+        if name=='with_directives':args=['u','--with','directive','-f','result.txt'];expected=b'RULE [safe]\n\nG [Rust]|[brief]|[]'
         piped=name=='piped_context'
         if piped:expected=b'G [Rust]|[brief]|[PIPE {literal}\n]'
         stderr=(root/'stderr').open('wb')
@@ -83,7 +90,7 @@ def case(name):
         def key(value):events.append(value.hex());os.write(master,value)
         def capture(label):
             frames.append({'label':label,'text':screen.text(),'width':screen.columns,'height':screen.rows})
-        failure=None; after_modes=None
+        failure=None; after_modes=None; actual=None
         try:
             if not name.startswith('new_') and name!='direct_missing':
                 wait('Find');capture('picker');key(query.encode()+b'\r')
@@ -98,6 +105,7 @@ def case(name):
                         elif name=='explicit_empty':key(b'\r')
                         elif name in ['defaults','frozen_context','render_failure']:key(b'Rust\r')
                         elif name=='one_supplied':key(b'brief\r')
+                        elif name=='with_directives':key(b'Rust\tsafe\tbrief\r')
                         else:key(b'Rust\tbrief\r')
                         if name!='render_failure':wait('Preview rendered prompt');capture('rendered')
                         if name=='long_identity':assert long_name in screen.text().replace('\n','').replace(' ','')
@@ -124,7 +132,11 @@ def case(name):
                 assert saved==(templates[id].replace('Old','New') if name=='edit_search' else 'Repaired note\n')
                 assert all(hashes(store).get(k)==v for k,v in before.items() if k!=f'prompts/{id}.md')
             else:
-                output=root/('explain.md' if name=='derived_destination' else 'result.txt');actual=output.read_bytes()
+                if terminal_payload:
+                    assert b'\x1b[?1049l' in raw,'alternate screen was not restored'
+                    actual=bytes(raw).rsplit(b'\x1b[?1049l',1)[1]
+                else:
+                    output=root/('explain.md' if name=='derived_destination' else 'result.txt');actual=output.read_bytes()
                 if name=='frozen_context':
                     uuid=re.search(rb'SNAP=([0-9a-f-]{36})',actual).group(1).decode();shown=next(f['text'] for f in frames if f['label']=='rendered').replace('\n','').replace(' ','');assert uuid in shown;assert actual.endswith(b'\nVALUE=Rust')
                 else:assert actual==expected,(actual,expected)
@@ -136,13 +148,15 @@ def case(name):
             if after_modes is None:after_modes=termios.tcgetattr(slave)
             stderr.close();os.close(master);os.close(slave)
         result={'case':name,'argv':args,'passed':failure is None,'error':failure,'exit':child.returncode,'events_hex':events,
-                'injected_bytes':sum(len(bytes.fromhex(v)) for v in events),'frames':frames,'terminal_restored':after_modes==before_modes}
+                'injected_bytes':sum(len(bytes.fromhex(v)) for v in events),'frames':frames,'terminal_restored':after_modes==before_modes,
+                'observed_payload_hex':None if actual is None else actual.hex(),'stderr':(root/'stderr').read_text(encoding='utf-8',errors='replace')}
         if A.capture_dir:
             A.capture_dir.mkdir(parents=True,exist_ok=True);(A.capture_dir/(name+'.terminal.bin')).write_bytes(raw)
             for frame in frames:(A.capture_dir/(name+'.'+frame['label']+'.screen.txt')).write_text(frame['text'],encoding='utf-8')
         return result
 
 names=A.case or ['guided_two','guided_narrow','guided_wide','long_identity','defaults','explicit_empty','literal_multiline','piped_context','frozen_context',
+    'bare_guided','t_guided','unknown_picker','with_directives',
     'derived_destination','supplied_fast','one_supplied','default_fast','direct_missing','render_failure','plain_fast','cancel_fields','cancel_preview','ctrl_c','sigterm','resize','tiny_blocked',
     'edit_search','edit_repair','new_editor','new_empty','new_failure','new_cancel']
 results=[]
