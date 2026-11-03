@@ -38,10 +38,10 @@ impl Clipboard {
                 self.context = ClipboardContext::new().ok();
                 self.initialized = true;
             }
-            return Ok(self
+            Ok(self
                 .context
                 .as_mut()
-                .is_some_and(|context| context.set_contents(content.to_owned()).is_ok()));
+                .is_some_and(|context| context.set_contents(content.to_owned()).is_ok()))
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         {

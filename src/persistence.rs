@@ -1,6 +1,8 @@
 //! Checked, same-directory writes shared by prompt mutations and explicit exports.
 
-use anyhow::{anyhow, bail, Context, Result};
+#[cfg(unix)]
+use anyhow::anyhow;
+use anyhow::{bail, Context, Result};
 use std::fmt;
 use std::fs::{self, File, Metadata};
 use std::io::{self, Read, Write};
