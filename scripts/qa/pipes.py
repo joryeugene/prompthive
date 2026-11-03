@@ -142,7 +142,7 @@ def cancellation_case(binary, bash, timeout, key):
     import select
     import struct
     import termios
-    from terminal_session import TerminalChild
+    from terminal_session import TerminalChild, terminal_modes
     with tempfile.TemporaryDirectory(prefix='ph-cancel-') as directory:
         root = Path(directory)
         store = root / 'store'
@@ -154,7 +154,7 @@ def cancellation_case(binary, bash, timeout, key):
         env.pop('NO_COLOR', None)
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 80, 0, 0))
-        before_modes = termios.tcgetattr(slave)
+        before_modes = terminal_modes(slave)
         child = TerminalChild([bash, '--noprofile', '--norc', '-o', 'pipefail', '-c', SHELL_SETUP + 'printf ctx | ph'],
                               slave=slave, cwd=root, env=env, stdin=slave, stdout=slave, stderr=slave)
         output = bytearray()
@@ -174,7 +174,7 @@ def cancellation_case(binary, bash, timeout, key):
             child.wait(timeout=2)
             checks = {'picker-observed': sent, 'exit130': child.returncode == 130,
                       'no-hang': not timed_out, 'store-unchanged': snapshot(store) == before_files,
-                      'terminal-restored': termios.tcgetattr(slave) == before_modes}
+                      'terminal-restored': terminal_modes(slave) == before_modes}
             return {'case': 'piped-context-' + ('escape' if key == b'\x1b' else 'ctrl-c'),
                     'command': 'printf ctx | ph', 'injected_key_hex': key.hex(),
                     'exit': child.returncode, 'checks': checks, 'passed': all(checks.values()),

@@ -3,7 +3,7 @@
 import argparse, hashlib, json, os, pathlib, re, select, signal, struct
 import subprocess, sys, tempfile, termios, time, fcntl, pty
 from vt_decode import VtScreen
-from terminal_session import TerminalChild
+from terminal_session import TerminalChild, terminal_modes
 
 P = argparse.ArgumentParser(description=__doc__)
 P.add_argument('binary', type=pathlib.Path)
@@ -44,7 +44,7 @@ def case(name):
         for k in ['DISPLAY','WAYLAND_DISPLAY','NO_COLOR','BASH_ENV','ENV','PROMPTHIVE_QA_MISSING_ENV_0V4']: env.pop(k,None)
         width,height=(40,18) if name in ['guided_narrow','long_identity'] else (120,40) if name=='guided_wide' else (80,24)
         master,slave=pty.openpty(); fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',height,width,0,0))
-        before_modes=termios.tcgetattr(slave); before=hashes(store); screen=VtScreen(width,height); raw=bytearray(); frames=[]; events=[]
+        before_modes=terminal_modes(slave); before=hashes(store); screen=VtScreen(width,height); raw=bytearray(); frames=[]; events=[]
         args=['u','-f','result.txt']; query='exp'; expected=b'G [Rust]|[brief]|[]'; expected_code=0
         if name in ['edit_search','edit_repair']: args=['e'];query='legacy' if name=='edit_search' else 'broken'
         if name.startswith('new_'):args=['n','notes/today']
@@ -121,7 +121,7 @@ def case(name):
             assert child.poll() is not None,'process hung after final action'
             for _ in range(3):drain(.02)
             assert child.returncode==expected_code,(child.returncode,(root/'stderr').read_text())
-            after_modes=termios.tcgetattr(slave)
+            after_modes=terminal_modes(slave)
             assert after_modes==before_modes,'terminal attributes changed'
             assert not screen.unsupported,screen.unsupported
             if expected_code!=0:assert hashes(store)==before and not (root/'result.txt').exists()
@@ -145,7 +145,7 @@ def case(name):
         except Exception as error:failure=repr(error)
         finally:
             if after_modes is None:
-                try:after_modes=termios.tcgetattr(slave)
+                try:after_modes=terminal_modes(slave)
                 except termios.error as error:failure=failure or repr(error)
             child.close()
             stderr.close();os.close(master);os.close(slave)

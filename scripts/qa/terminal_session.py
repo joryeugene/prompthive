@@ -8,6 +8,18 @@ import sys
 import time
 
 
+def terminal_modes(slave):
+    import fcntl
+    import struct
+    import termios
+    # Darwin sets transient PENDIN when canonical input is restored. A
+    # non-consuming readiness query settles that kernel state as a shell's
+    # next input check would. No flags are masked or terminal settings reset.
+    # Apple XNU bsd/kern/tty.c: ttnread()/ttypend().
+    fcntl.ioctl(slave, termios.FIONREAD, struct.pack('i', 0))
+    return termios.tcgetattr(slave)
+
+
 class TerminalChild:
     def __init__(self, command, *, slave, stdin, stdout, stderr, cwd, env):
         status_read, status_write = os.pipe()

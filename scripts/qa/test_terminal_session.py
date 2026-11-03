@@ -11,13 +11,13 @@ import subprocess
 import termios
 import time
 import unittest
-from terminal_session import TerminalChild
+from terminal_session import TerminalChild, terminal_modes
 
 
 class TerminalSessionContract(unittest.TestCase):
     def exercise(self, source, interact=None, piped=False):
         master, slave = pty.openpty()
-        before = termios.tcgetattr(slave)
+        before = terminal_modes(slave)
         child = None
         try:
             child = TerminalChild([sys.executable, '-c', source], slave=slave,
@@ -29,7 +29,7 @@ class TerminalSessionContract(unittest.TestCase):
             # A live owner is required here on Darwin, and must never itself
             # repair the modes that the tested process left behind.
             self.assertIsNone(child.supervisor.poll())
-            after = termios.tcgetattr(slave)
+            after = terminal_modes(slave)
             if before != after:
                 print('PTY mode difference:', [(i, a, b) for i, (a, b) in enumerate(zip(before, after)) if a != b], file=sys.stderr)
             return result, before == after
@@ -47,6 +47,9 @@ class TerminalSessionContract(unittest.TestCase):
 
     def test_dirty_modes_are_rejected_after_successful_exit(self):
         self.assertEqual(self.exercise('import tty; tty.setraw(1)'), (0, False))
+
+    def test_single_echo_change_is_rejected(self):
+        self.assertEqual(self.exercise('import termios; mode=termios.tcgetattr(1); mode[3]&=~termios.ECHO; termios.tcsetattr(1,termios.TCSANOW,mode)'), (0, False))
 
     def test_piped_stdin_reaches_eof(self):
         def write(child, master):
