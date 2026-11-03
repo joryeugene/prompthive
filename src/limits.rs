@@ -218,9 +218,127 @@ impl Budget {
     }
 }
 
+/// Walk expanded scalars and containers without constructing Values. YAML aliases
+/// can repeat a large scalar many times while their source remains below 1 MiB.
+pub(crate) fn validate_yaml_expansion(yaml: &str) -> Result<()> {
+    use serde::de::{DeserializeSeed, EnumAccess, MapAccess, SeqAccess, VariantAccess, Visitor};
+    struct State {
+        budget: Budget,
+        exceeded: bool,
+    }
+    impl State {
+        fn charge<E: serde::de::Error>(&mut self, bytes: usize) -> std::result::Result<(), E> {
+            if self.budget.add(bytes).is_err() {
+                self.exceeded = true;
+                return Err(E::custom("expanded YAML data exceeds the safety budget"));
+            }
+            Ok(())
+        }
+    }
+    struct Counter<'a>(&'a mut State);
+    impl<'de> DeserializeSeed<'de> for Counter<'_> {
+        type Value = ();
+        fn deserialize<D: serde::Deserializer<'de>>(
+            self,
+            deserializer: D,
+        ) -> std::result::Result<(), D::Error> {
+            // Reserve for Values, map nodes and the metadata copies used by the
+            // existing parser. This is a conservative data budget, not an allocator sandbox.
+            self.0
+                .charge::<D::Error>(4 * std::mem::size_of::<serde_yaml::Value>())?;
+            deserializer.deserialize_any(self)
+        }
+    }
+    impl<'de> Visitor<'de> for Counter<'_> {
+        type Value = ();
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("bounded YAML data")
+        }
+        fn visit_bool<E: serde::de::Error>(self, _: bool) -> std::result::Result<(), E> {
+            Ok(())
+        }
+        fn visit_i64<E: serde::de::Error>(self, _: i64) -> std::result::Result<(), E> {
+            Ok(())
+        }
+        fn visit_u64<E: serde::de::Error>(self, _: u64) -> std::result::Result<(), E> {
+            Ok(())
+        }
+        fn visit_f64<E: serde::de::Error>(self, _: f64) -> std::result::Result<(), E> {
+            Ok(())
+        }
+        fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<(), E> {
+            Ok(())
+        }
+        fn visit_none<E: serde::de::Error>(self) -> std::result::Result<(), E> {
+            Ok(())
+        }
+        fn visit_some<D: serde::Deserializer<'de>>(
+            self,
+            deserializer: D,
+        ) -> std::result::Result<(), D::Error> {
+            self.deserialize(deserializer)
+        }
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> std::result::Result<(), E> {
+            self.0.charge(value.len().saturating_mul(4))
+        }
+        fn visit_seq<A: SeqAccess<'de>>(
+            self,
+            mut sequence: A,
+        ) -> std::result::Result<(), A::Error> {
+            while sequence.next_element_seed(Counter(self.0))?.is_some() {}
+            Ok(())
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut mapping: A) -> std::result::Result<(), A::Error> {
+            while mapping.next_key_seed(Counter(self.0))?.is_some() {
+                mapping.next_value_seed(Counter(self.0))?;
+            }
+            Ok(())
+        }
+        fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> std::result::Result<(), A::Error> {
+            let ((), value) = data.variant_seed(Counter(self.0))?;
+            value.newtype_variant_seed(Counter(self.0))
+        }
+    }
+    let mut state = State {
+        budget: Budget::new(TEXT_BYTES, "expanded YAML data"),
+        exceeded: false,
+    };
+    let result = Counter(&mut state).deserialize(serde_yaml::Deserializer::from_str(yaml));
+    if state.exceeded {
+        return Err(exceeded("expanded YAML data", TEXT_BYTES));
+    }
+    result.context("invalid YAML frontmatter")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn yaml_preflight_accepts_tags_and_small_aliases_but_bounds_expanded_scalars() {
+        validate_yaml_expansion("base: &a !custom {text: hello}\ncopy: *a\n").unwrap();
+        let scalar = "x".repeat(512 * 1024);
+        validate_yaml_expansion(&format!(
+            "base: &large {scalar}\ncopies: [{}]\n",
+            vec!["*large"; 14].join(", ")
+        ))
+        .unwrap();
+        assert!(validate_yaml_expansion(&format!(
+            "base: &large {scalar}\ncopies: [{}]\n",
+            vec!["*large"; 15].join(", ")
+        ))
+        .unwrap_err()
+        .downcast_ref::<LimitError>()
+        .is_some());
+        let huge = format!(
+            "base: &large {}\ncopies: [{}]\n",
+            "x".repeat(512 * 1024),
+            vec!["*large"; 1000].join(", ")
+        );
+        assert!(validate_yaml_expansion(&huge)
+            .unwrap_err()
+            .downcast_ref::<LimitError>()
+            .is_some());
+    }
     #[test]
     fn repeated_small_chunks_do_not_reserve_the_whole_budget() {
         let bytes = read(

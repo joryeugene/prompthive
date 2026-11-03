@@ -11,6 +11,68 @@ struct Fixture {
     temporary: tempfile::TempDir,
     store: PathBuf,
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn expanded_yaml_aliases_fail_cleanly_under_a_process_memory_cap() {
+    use std::os::unix::process::CommandExt;
+    let fixture = Fixture::new();
+    let path = fixture.store.join("prompts/aliases.md");
+    let output = fixture.temporary.path().join("output.txt");
+    for (aliases, expected) in [(14, 0), (15, 2), (1000, 2)] {
+        let content = format!(
+            "---\ncustom: &large {}\nreferences: [{}]\n---\n\nBODY",
+            "x".repeat(512 * 1024),
+            vec!["*large"; aliases].join(", ")
+        );
+        assert!(content.len() < FRONTMATTER_BYTES);
+        fs::write(&path, &content).unwrap();
+        fs::write(&output, "ORIGINAL").unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ph"));
+        command
+            .args(["s", "aliases", "-f"])
+            .arg(&output)
+            .arg("--force")
+            .env("PROMPTHIVE_BASE_DIR", &fixture.store)
+            .env("XDG_RUNTIME_DIR", fixture.temporary.path().join("runtime"))
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
+            .stdin(Stdio::null());
+        unsafe {
+            command.pre_exec(|| {
+                for (resource, maximum) in [
+                    (libc::RLIMIT_AS, 256 * 1024 * 1024),
+                    (libc::RLIMIT_CPU, 2),
+                    (libc::RLIMIT_CORE, 0),
+                ] {
+                    let limit = libc::rlimit {
+                        rlim_cur: maximum,
+                        rlim_max: maximum,
+                    };
+                    if libc::setrlimit(resource, &limit) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+        let result = command.output().unwrap();
+        assert_eq!(
+            result.status.code(),
+            Some(expected),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(result.stdout.is_empty());
+        assert_eq!(fs::read_to_string(&path).unwrap(), content);
+        if expected == 0 {
+            assert_eq!(fs::read(&output).unwrap(), b"BODY");
+        } else {
+            assert!(String::from_utf8_lossy(&result.stderr).contains("expanded YAML data"));
+            assert_eq!(fs::read(&output).unwrap(), b"ORIGINAL");
+        }
+    }
+}
 impl Fixture {
     fn new() -> Self {
         let temporary = tempfile::tempdir().unwrap();

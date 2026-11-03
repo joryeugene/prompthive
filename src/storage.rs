@@ -336,6 +336,7 @@ impl Storage {
                     crate::limits::FRONTMATTER_BYTES,
                     "YAML frontmatter",
                 )?;
+                crate::limits::validate_yaml_expansion(yaml)?;
                 let value: serde_yaml::Value =
                     serde_yaml::from_str(yaml).context("invalid YAML frontmatter")?;
                 if !value.is_mapping() {
