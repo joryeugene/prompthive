@@ -29,11 +29,13 @@ pub fn handle_completion(shell: &str) -> Result<()> {
 const BASH_NAMES: &str = r#"
 # Saved names are read at completion time, so later additions need no regeneration.
 _ph_selector_position() {
-    local action=${COMP_WORDS[1]-} word expecting='' positional=0 i
+    local action=${COMP_WORDS[1]-} word expecting='' positional=0 i literal=false
     for ((i=2; i<COMP_CWORD; i++)); do
         word=${COMP_WORDS[i]}
+        if [[ $literal == true ]]; then ((positional+=1)); continue; fi
         if [[ -n $expecting ]]; then expecting=''; continue; fi
         case "$word" in
+            --) literal=true ;;
             -s|-a|-f|--with|--format|--context|--output|-m|--message) expecting=$word ;;
             -v) case "$action" in u|use|c|compose|chain) expecting=$word ;; esac ;;
             -c) [[ $action == diff ]] && expecting=$word ;;
@@ -41,6 +43,7 @@ _ph_selector_position() {
             *) ((positional+=1)) ;;
         esac
     done
+    [[ ${COMP_WORDS[COMP_CWORD]-} == -* && $literal == false ]] && return 1
     if [[ -n $expecting ]]; then
         case "$action:$expecting" in
             u:-a|use:-a|s:-a|show:-a|n:-a|new:-a|c:-a|compose:-a|chain:-a|x:-a|clean:-a|l:-a|ls:-a|list:-a|f:-a|find:-a) printf name; return 0 ;;
@@ -57,7 +60,7 @@ _ph_selector_position() {
 }
 _ph() {
     local current=${COMP_WORDS[COMP_CWORD]-} mode prefix='' fragment candidate
-    if [[ $current != -* ]] && mode=$(_ph_selector_position); then
+    if mode=$(_ph_selector_position); then
         fragment=$current
         if [[ $mode == compose && $current == *,* ]]; then
             prefix=${current%,*},
@@ -77,12 +80,14 @@ complete -o bashdefault -o default -F _ph ph
 
 const ZSH_NAMES: &str = r#"
 _ph_selector_position() {
-    local action=${words[2]-} word expecting=''
+    local action=${words[2]-} word expecting='' literal=false
     local -i positional=0 i
     for ((i=3; i<CURRENT; i++)); do
         word=${words[i]}
+        if [[ $literal == true ]]; then ((positional+=1)); continue; fi
         if [[ -n $expecting ]]; then expecting=''; continue; fi
         case "$word" in
+            --) literal=true ;;
             -s|-a|-f|--with|--format|--context|--output|-m|--message) expecting=$word ;;
             -v) case "$action" in u|use|c|compose|chain) expecting=$word ;; esac ;;
             -c) [[ $action == diff ]] && expecting=$word ;;
@@ -90,6 +95,7 @@ _ph_selector_position() {
             *) ((positional+=1)) ;;
         esac
     done
+    [[ ${words[CURRENT]-} == -* && $literal == false ]] && return 1
     if [[ -n $expecting ]]; then
         case "$action:$expecting" in
             u:-a|use:-a|s:-a|show:-a|n:-a|new:-a|c:-a|compose:-a|chain:-a|x:-a|clean:-a|l:-a|ls:-a|list:-a|f:-a|find:-a) print -r -- name; return 0 ;;
@@ -107,7 +113,7 @@ _ph_selector_position() {
 _ph() {
     local mode
     local -a names
-    if [[ ${words[CURRENT]-} != -* ]] && mode=$(_ph_selector_position); then
+    if mode=$(_ph_selector_position); then
         names=("${(@f)$(command ph l 2>/dev/null)}")
         [[ $mode == compose ]] && compset -P '*,'
         compadd -a names
@@ -123,20 +129,24 @@ function __ph_selector_position
     set -l words (commandline -opc)
     test (count $words) -ge 2; or return 1
     set -l current (commandline -ct)
-    if test (count $current) -gt 0
-        string match -q -- '-*' "$current"; and return 1
-    end
     set -l action $words[2]
     set -l expecting ''
     set -l positional 0
+    set -l literal false
     set -l arguments $words
     set -e arguments[1..2]
     for word in $arguments
+        if test "$literal" = true
+            set positional (math $positional + 1)
+            continue
+        end
         if test -n "$expecting"
             set expecting ''
             continue
         end
         switch $word
+            case --
+                set literal true
             case -s -a -f --with --format --context --output -m --message
                 set expecting $word
             case -v
@@ -147,6 +157,9 @@ function __ph_selector_position
             case '*'
                 set positional (math $positional + 1)
         end
+    end
+    if test "$literal" = false; and test (count $current) -gt 0
+        string match -q -- '-*' "$current"; and return 1
     end
     if test -n "$expecting"
         contains -- $action u use s show n new c compose chain x clean l ls list f find; and test "$expecting" = -a; and return 0
@@ -177,4 +190,10 @@ function __ph_prompt_names
     end
 end
 complete -c ph -f -n '__ph_selector_position' -a '(__ph_prompt_names)'
+function __ph_append_position
+    set -l words (commandline -opc)
+    test (count $words) -ge 2; or return 1
+    contains -- $words[2] u use s show n new c compose chain x clean l ls list f find; and __ph_selector_position
+end
+complete -c ph -s a -r -f -n '__ph_append_position' -a '(__ph_prompt_names)'
 "#;

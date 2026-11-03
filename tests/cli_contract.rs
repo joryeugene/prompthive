@@ -1262,6 +1262,10 @@ printf '%s\n' "${COMPREPLY[@]}"
     );
     // Create this after generation: a static snapshot of names cannot pass.
     fixture.prompt("review", "Added after completion generation");
+    fixture.prompt(
+        "-review",
+        "A canonical name requiring the end-of-options marker",
+    );
     for (words, expected) in [
         (vec!["ph", "use", "rev"], vec!["review"]),
         (vec!["ph", "u", "-q", "rev"], vec!["review"]),
@@ -1275,6 +1279,16 @@ printf '%s\n' "${COMPREPLY[@]}"
         (vec!["ph", "use", "review", "rev"], vec![]),
         (vec!["ph", "n", "rev"], vec![]),
         (vec!["ph", "use", "review", "-v", "rev"], vec![]),
+        (vec!["ph", "use", "-r"], vec![]),
+        (vec!["ph", "use", "--", "-r"], vec!["-review"]),
+        (vec!["ph", "show", "--", "-r"], vec!["-review"]),
+        (vec!["ph", "edit", "--", "-r"], vec!["-review"]),
+        (vec!["ph", "delete", "--", "-r"], vec!["-review"]),
+        (vec!["ph", "c", "--", "-r"], vec!["-review"]),
+        (vec!["ph", "c", "--", "-review,rev"], vec!["-review,review"]),
+        (vec!["ph", "use", "--", "-review", "rev"], vec![]),
+        (vec!["ph", "r", "--", "-review", "rev"], vec![]),
+        (vec!["ph", "diff", "--", "-review", "review", "rev"], vec![]),
     ] {
         let output = complete(&words);
         assert!(
@@ -1300,6 +1314,31 @@ fn editor_script(fixture: &Fixture, script: &str) -> PathBuf {
     fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
     path
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_editor_command_preserves_native_paths_for_saved_and_rendered_edits() {
+    let fixture = Fixture::new();
+    fixture.prompt("review", "Unchanged editor fixture");
+    let original = fs::read(fixture.path("review")).unwrap();
+    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+    let executable = system.join("System32").join("cmd.exe");
+    assert!(executable.is_file());
+    for editor in [
+        format!("{} /D /C exit 0", executable.display()),
+        format!("\"{}\" /D /C exit 0", executable.display()),
+    ] {
+        for args in [vec!["e", "review"], vec!["u", "review", "--edit", "-q"]] {
+            let result = fixture.run_env(&args, b"", &[("EDITOR", &editor)]);
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert_eq!(fs::read(fixture.path("review")).unwrap(), original);
+        }
+    }
 }
 
 #[cfg(unix)]
