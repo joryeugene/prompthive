@@ -1,6 +1,6 @@
-<img align="right" src="docs/assets/byt.png" alt="Byt, Prompthive’s terminal buddy" width="128" />
-
 # Prompthive
+
+<img align="right" src="docs/assets/byt.png" alt="Byt, Prompthive’s terminal buddy" width="128" />
 
 A local-first prompt toolkit for your terminal. Find, compose, and reuse prompts with fewer keystrokes.
 
