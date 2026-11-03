@@ -437,9 +437,13 @@ impl PickerState {
                 Line::from(if area.width >= 52 {
                     NAVIGATION
                 } else {
-                    "Type / arrows / Enter / Esc"
+                    "Up/Down select  Enter use  Esc cancel"
                 }),
-                Line::from("PgUp/PgDn preview"),
+                Line::from(if area.width >= 52 {
+                    "PgUp/PgDn preview  Default: copy; show if unavailable"
+                } else {
+                    "Default: copy/show; PgUp/PgDn preview"
+                }),
                 Line::from(if area.width >= 44 {
                     COMMANDS
                 } else {

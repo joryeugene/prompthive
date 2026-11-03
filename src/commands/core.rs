@@ -93,7 +93,7 @@ pub fn run(command: Option<Commands>) -> Result<()> {
         let input = read_input(None)?;
         if !interactive() {
             if input.is_empty() {
-                write_stdout("ph — local prompts and notes\n\n  u use      render a known prompt\n  f find     search names and descriptions\n  n new      save text\n  e edit     edit saved text\n  c compose  chain left to right\n\n  ph n review 'Review {input}'\n  git diff | ph u review\n\nRun ph in a terminal to search and preview, or ph --help for all actions.\n")?;
+                write_stdout("ph — local prompts and notes\n\n  u use      render a known prompt\n  f find     search names and descriptions\n  n new      save text\n  e edit     edit saved text\n  c compose  chain left to right\n\n  ph n review 'Review {input}'\n  git diff | ph u review\n\nUse copies in a terminal (shows text if unavailable); pipes print text.\nRun ph in a terminal to search and preview, or ph --help for all actions.\n")?;
                 return Ok(());
             }
             return Err(fail(

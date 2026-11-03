@@ -2,7 +2,7 @@ use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name="ph", version, about="Find, compose, and reuse local prompts", color=clap::ColorChoice::Never,
- after_help="Start with ph to search and preview.\n\n  ph u review                  use a known prompt\n  ph f review                  find by name or description\n  ph n review 'Review {input}' save a prompt\n  ph e review                  edit in $EDITOR\n  ph c tone,review 'context'    compose left to right\n\nPipes contain only prompt text. Use exact names in scripts.")]
+ after_help="Start with ph to search and preview.\n\n  ph u review                  use a known prompt\n  ph f review                  find by name or description\n  ph n review 'Review {input}' save a prompt\n  ph e review                  edit in $EDITOR\n  ph c tone,review 'context'    compose left to right\n\nUse copies text in a terminal (shows it if copying is unavailable). Pipes print only text. Use exact names in scripts.")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -28,16 +28,27 @@ pub struct Destinations {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Render a prompt; omit NAME to search and preview
-    #[command(visible_alias = "u")]
+    #[command(
+        visible_alias = "u",
+        after_help = "With terminal output, copy the rendered text; show it if copying is unavailable. Pipes and -q print only text. An explicit destination overrides this default.
+
+Input comes from INPUT or stdin, never both. Omitted input is empty for {input}; declared required variables still need -v NAME=value."
+    )]
     Use {
+        /// Exact prompt name; omit to choose with a preview
         name: Option<String>,
+        /// Literal context; omit to read stdin, or use empty context
         input: Option<String>,
+        /// Review rendered text in $EDITOR before output
         #[arg(short = 'e', long)]
         edit: bool,
+        /// Supply a declared template variable; repeat for distinct names
         #[arg(short = 'v', value_name = "NAME=VALUE")]
         vars: Vec<String>,
+        /// Prefix comma-separated local prompt names or explicit file paths
         #[arg(long = "with", value_name = "FILES")]
         with_directives: Option<String>,
+        /// Copy only; report an error if the clipboard is unavailable
         #[arg(short = 'c', long)]
         clipboard: bool,
         #[command(flatten)]
@@ -49,6 +60,7 @@ pub enum Commands {
         name: String,
         #[arg(short = 'e', long)]
         edit: bool,
+        /// Copy only; report an error if the clipboard is unavailable
         #[arg(short = 'c', long)]
         clipboard: bool,
         #[command(flatten)]
@@ -63,6 +75,7 @@ pub enum Commands {
         edit: bool,
         #[arg(long)]
         clean: bool,
+        /// Copy only; report an error if the clipboard is unavailable
         #[arg(short = 'c', long)]
         clipboard: bool,
         #[command(flatten)]
@@ -75,6 +88,7 @@ pub enum Commands {
     #[command(visible_alias = "f")]
     Find {
         query: String,
+        /// Copy only; report an error if the clipboard is unavailable
         #[arg(short = 'c', long)]
         clipboard: bool,
         #[command(flatten)]
@@ -83,6 +97,7 @@ pub enum Commands {
     /// List canonical prompt names
     #[command(visible_aliases=["l","list"])]
     Ls {
+        /// Copy only; report an error if the clipboard is unavailable
         #[arg(short = 'c', long)]
         clipboard: bool,
         #[command(flatten)]
@@ -95,6 +110,7 @@ pub enum Commands {
         input: Option<String>,
         #[arg(short = 'e', long)]
         edit: bool,
+        /// Supply a declared template variable; repeat for distinct names
         #[arg(short = 'v', value_name = "NAME=VALUE")]
         vars: Vec<String>,
         #[arg(long)]
@@ -112,6 +128,7 @@ pub enum Commands {
     #[command(visible_alias = "x")]
     Clean {
         text: Option<String>,
+        /// Copy only; report an error if the clipboard is unavailable
         #[arg(short = 'c', long)]
         clipboard: bool,
         #[command(flatten)]
