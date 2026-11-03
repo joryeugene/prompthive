@@ -7,6 +7,7 @@ pub mod compose;
 pub mod edit;
 pub mod import;
 pub mod io_options;
+pub mod limits;
 pub mod matching;
 pub mod persistence;
 pub mod portability;
