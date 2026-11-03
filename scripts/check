@@ -6,6 +6,7 @@ repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
 
 bash scripts/test-release-gate
+python3 scripts/qa/test_terminal_session.py
 cargo fmt --all --check
 cargo test --locked --offline
 cargo test --locked --offline --no-default-features
@@ -18,7 +19,14 @@ if [[ "$candidate_dir" != /* && ! "$candidate_dir" =~ ^[[:alpha:]]: ]]; then
   candidate_dir="$repo_root/$candidate_dir"
 fi
 candidate="$candidate_dir/debug/ph"
-if [[ ! -f "$candidate" && -f "$candidate.exe" ]]; then
+# Git Bash's -f can find ph.exe when asked for ph; native Python cannot.
+if [[ "${OS:-}" == Windows_NT || ( ! -f "$candidate" && -f "$candidate.exe" ) ]]; then
   candidate="$candidate.exe"
 fi
 PROMPTHIVE_BIN="$candidate" bash examples/creative_patterns.sh
+bash scripts/test-pipes "$candidate"
+bash scripts/test-interactive "$candidate"
+cargo build --locked --offline --bin ph --no-default-features
+bash scripts/test-pipes "$candidate" --headless
+# Leave the regular development executable in its default feature configuration.
+cargo build --locked --offline --bin ph

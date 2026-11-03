@@ -80,7 +80,7 @@ impl TemplateProcessor {
             }
         }
         let mut context = RenderContext::capture();
-        Ok(PreparedTemplate::compile(template, declared, supplied, &mut context)?.render(input))
+        PreparedTemplate::compile(template, declared, supplied, &mut context)?.render(input)
     }
 
     pub fn set_custom_variable(&mut self, name: &str, value: &str) {
@@ -172,7 +172,7 @@ impl RenderContext {
             .directory
             .as_ref()
             .context("cannot determine the current directory")?;
-        let output = Command::new("git")
+        let mut child = Command::new("git")
             .args([
                 "--no-optional-locks",
                 "-c",
@@ -184,12 +184,26 @@ impl RenderContext {
             .current_dir(directory)
             .stdin(Stdio::null())
             .stderr(Stdio::null())
-            .output()
+            .stdout(Stdio::piped())
+            .spawn()
             .with_context(|| format!("cannot read requested Git context {{{token}}}"))?;
-        if !output.status.success() {
+        let output = crate::limits::read(
+            child.stdout.take().expect("piped Git stdout"),
+            crate::limits::TEXT_BYTES,
+            "Git context",
+        );
+        let bytes = match output {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
+        if !child.wait()?.success() {
             bail!("requested Git context {{{token}}} is unavailable in this directory");
         }
-        let text = String::from_utf8(output.stdout).context("Git context is not valid UTF-8")?;
+        let text = String::from_utf8(bytes).context("Git context is not valid UTF-8")?;
         Ok(text.trim_end_matches(['\r', '\n']).to_string())
     }
 }
@@ -204,95 +218,157 @@ enum Part {
 pub(crate) struct PreparedTemplate {
     parts: Vec<Part>,
     has_input: bool,
+    text_bytes: usize,
 }
 
 impl PreparedTemplate {
+    pub(crate) fn compiled_bytes(&self) -> Result<usize> {
+        let overflow =
+            || crate::limits::exceeded("compiled composition", crate::limits::IMPORT_BYTES);
+        let mut bytes = self
+            .parts
+            .capacity()
+            .checked_mul(std::mem::size_of::<Part>())
+            .ok_or_else(overflow)?;
+        for part in &self.parts {
+            if let Part::Text(text) = part {
+                bytes = bytes.checked_add(text.capacity()).ok_or_else(overflow)?;
+            }
+        }
+        Ok(bytes)
+    }
     pub(crate) fn compile(
         source: &str,
         declared: &Declarations,
         supplied: &Variables,
         context: &mut RenderContext,
     ) -> Result<Self> {
+        crate::limits::check_text(source, "template source")?;
         validate_declarations(declared)?;
-        let mut values = Variables::new();
+        let mut values = BTreeMap::new();
         for (name, default) in declared {
             let value = supplied.get(name).or(default.as_ref()).with_context(|| {
                 format!("required variable {name:?} is missing; supply -v {name}=VALUE")
             })?;
-            values.insert(name.clone(), value.clone());
+            crate::limits::check_text(value, "template value")?;
+            values.insert(name.as_str(), value.as_str());
         }
 
         let mut prepared = Self {
             parts: Vec::new(),
             has_input: false,
+            text_bytes: 0,
         };
         let mut offset = 0;
         while let Some(relative) = source[offset..].find('{') {
             let start = offset + relative;
-            prepared.push_text(&source[offset..start]);
+            prepared.push_text(&source[offset..start])?;
             if source[start..].starts_with("{{") {
                 if let Some(relative_end) = source[start + 2..].find("}}") {
                     let end = start + 2 + relative_end;
                     let token = &source[start + 2..end];
                     if is_reserved_name(token) || declared.contains_key(token) {
-                        prepared.push_text(&format!("{{{token}}}"));
+                        prepared.push_text(&format!("{{{token}}}"))?;
                     } else {
-                        prepared.push_text(&source[start..end + 2]);
+                        prepared.push_text(&source[start..end + 2])?;
                     }
                     offset = end + 2;
                     continue;
                 }
-                prepared.push_text(&source[start..]);
+                prepared.push_text(&source[start..])?;
                 offset = source.len();
                 break;
             }
             let Some(relative_end) = source[start + 1..].find('}') else {
-                prepared.push_text(&source[start..]);
+                prepared.push_text(&source[start..])?;
                 offset = source.len();
                 break;
             };
             let end = start + 1 + relative_end;
             let token = &source[start + 1..end];
             if token.contains('{') {
-                prepared.push_text("{");
+                prepared.push_text("{")?;
                 offset = start + 1;
                 continue;
             }
             if INPUT_SLOTS.contains(&token) {
+                crate::limits::check_parts(prepared.parts.len() + 1)?;
                 prepared.parts.push(Part::Input);
                 prepared.has_input = true;
             } else if SYSTEM_SLOTS.contains(&token) || token.starts_with("env:") {
-                prepared.push_text(&context.value(token)?);
+                prepared.push_text(&context.value(token)?)?;
             } else if let Some(value) = values.get(token) {
-                prepared.push_text(value);
+                prepared.push_text(value)?;
             } else {
-                prepared.push_text(&source[start..=end]);
+                prepared.push_text(&source[start..=end])?;
             }
             offset = end + 1;
         }
-        prepared.push_text(&source[offset..]);
+        prepared.push_text(&source[offset..])?;
         Ok(prepared)
     }
 
-    fn push_text(&mut self, value: &str) {
+    fn push_text(&mut self, value: &str) -> Result<()> {
         if value.is_empty() {
-            return;
+            return Ok(());
         }
+        let size = self.text_bytes.checked_add(value.len()).ok_or_else(|| {
+            crate::limits::exceeded("compiled template text", crate::limits::TEXT_BYTES)
+        })?;
+        crate::limits::check_len(size, crate::limits::TEXT_BYTES, "compiled template text")?;
         match self.parts.last_mut() {
-            Some(Part::Text(previous)) => previous.push_str(value),
-            _ => self.parts.push(Part::Text(value.to_string())),
+            Some(Part::Text(previous)) => {
+                crate::limits::push_str(previous, value, "compiled template text")?
+            }
+            _ => {
+                crate::limits::check_parts(self.parts.len() + 1)?;
+                self.parts.push(Part::Text(value.to_string()));
+            }
         }
+        self.text_bytes = size;
+        Ok(())
     }
 
-    pub(crate) fn prepend(&mut self, mut before: Self) {
-        before.push_text("\n\n");
+    pub(crate) fn prepend(&mut self, mut before: Self) -> Result<()> {
+        before.push_text("\n\n")?;
+        let size = before
+            .text_bytes
+            .checked_add(self.text_bytes)
+            .ok_or_else(|| {
+                crate::limits::exceeded("combined template", crate::limits::TEXT_BYTES)
+            })?;
+        crate::limits::check_len(size, crate::limits::TEXT_BYTES, "combined template")?;
+        crate::limits::check_parts(before.parts.len() + self.parts.len())?;
         before.parts.append(&mut self.parts);
         self.parts = before.parts;
         self.has_input |= before.has_input;
+        self.text_bytes = size;
+        Ok(())
     }
 
-    pub(crate) fn render(&self, input: &str) -> String {
+    pub(crate) fn render(&self, input: &str) -> Result<String> {
+        crate::limits::check_text(input, "template input")?;
+        let mut size = self.text_bytes;
+        for part in &self.parts {
+            if matches!(part, Part::Input) {
+                size = size.checked_add(input.len()).ok_or_else(|| {
+                    crate::limits::exceeded("rendered output", crate::limits::TEXT_BYTES)
+                })?;
+            }
+        }
+        if !self.has_input && !input.is_empty() {
+            size = size
+                .checked_add(2)
+                .and_then(|size| size.checked_add(input.len()))
+                .ok_or_else(|| {
+                    crate::limits::exceeded("rendered output", crate::limits::TEXT_BYTES)
+                })?;
+        }
+        crate::limits::check_len(size, crate::limits::TEXT_BYTES, "rendered output")?;
         let mut result = String::new();
+        result
+            .try_reserve_exact(size)
+            .context("cannot allocate bounded rendered output")?;
         for part in &self.parts {
             match part {
                 Part::Text(text) => result.push_str(text),
@@ -303,7 +379,7 @@ impl PreparedTemplate {
             result.push_str("\n\n");
             result.push_str(input);
         }
-        result
+        Ok(result)
     }
 }
 
@@ -451,7 +527,7 @@ mod tests {
             &mut context,
         )
         .unwrap();
-        assert_eq!(prepared.render(""), "{date}");
+        assert_eq!(prepared.render("").unwrap(), "{date}");
         env::remove_var(&name);
         assert!(RenderContext::capture().value(&token).is_err());
     }

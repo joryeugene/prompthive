@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Exercise an existing executable; never discover or modify a real prompt store.
+set -euo pipefail
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+exec python3 "$repo_root/scripts/qa/pipes.py" --bash "$BASH" "$@"

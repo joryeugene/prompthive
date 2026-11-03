@@ -13,6 +13,80 @@ pub struct IoOptions {
     pub clipboard: bool,
 }
 impl IoOptions {
+    /// Describe the same destination emit will use, without touching it.
+    pub fn confirmation(&self, label: &str) -> String {
+        let d = &self.destination;
+        if let Some(name) = &d.save {
+            return format!("Save as {name}");
+        }
+        if let Some(name) = &d.append {
+            return format!("Append to {name}");
+        }
+        if let Some(path) = &d.file {
+            let path = if path.is_empty() {
+                format!("{}.md", label.rsplit('/').next().unwrap_or("prompt"))
+            } else {
+                path.clone()
+            };
+            return format!("Write {path}");
+        }
+        if self.clipboard {
+            return "Copy to clipboard".into();
+        }
+        if std::io::stdout().is_terminal() && !d.quiet {
+            "Copy to clipboard; show text if unavailable".into()
+        } else {
+            "Print rendered text".into()
+        }
+    }
+
+    /// Reject obvious new-document conflicts before launching an editor.
+    pub fn preflight_new(&self, storage: &Storage, label: &str) -> Result<()> {
+        let d = &self.destination;
+        let default_save =
+            !self.clipboard && d.save.is_none() && d.append.is_none() && d.file.is_none();
+        if let Some(name) = d.save.as_deref().or(default_save.then_some(label)) {
+            if storage.prompt_exists(name) {
+                return Err(fail(
+                    2,
+                    format!("prompt {name:?} already exists; use ph e to edit"),
+                ));
+            }
+            if !storage.snapshot_paths(name)?.is_empty() {
+                return Err(fail(
+                    2,
+                    format!(
+                        "prompt {name:?} has recovery history; restore it or choose a new name"
+                    ),
+                ));
+            }
+        }
+        if let Some(name) = &d.append {
+            crate::commands::common::resolve_prompt_name(storage, name)?;
+        }
+        if let Some(path) = &d.file {
+            let filename = if path.is_empty() {
+                format!("{}.md", label.rsplit('/').next().unwrap_or("prompt"))
+            } else {
+                path.clone()
+            };
+            match std::fs::symlink_metadata(&filename) {
+                Ok(meta) => {
+                    anyhow::ensure!(
+                        meta.is_file(),
+                        "export target is not a regular file: {filename}"
+                    );
+                    anyhow::ensure!(
+                        d.force,
+                        "export file already exists: {filename}; use --force to replace it"
+                    );
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
     pub fn new(destination: Destinations, clipboard: bool) -> Result<Self> {
         let count = usize::from(destination.save.is_some())
             + usize::from(destination.append.is_some())
@@ -48,6 +122,7 @@ impl IoOptions {
         label: &str,
         metadata: Option<&PromptMetadata>,
     ) -> Result<()> {
+        crate::limits::check_text(content, "output")?;
         let d = &self.destination;
         if let Some(name) = &d.save {
             if storage.prompt_exists(name) {
@@ -71,7 +146,10 @@ impl IoOptions {
             } else if content.is_empty() {
                 body
             } else {
-                format!("{body}\n\n{content}")
+                let mut joined = body;
+                crate::limits::push_str(&mut joined, "\n\n", "appended prompt")?;
+                crate::limits::push_str(&mut joined, content, "appended prompt")?;
+                joined
             };
             storage.replace_if_unchanged(&name, &meta, &joined, &original)?;
             self.status(&format!("Appended to {name}."));

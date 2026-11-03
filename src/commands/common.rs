@@ -85,16 +85,20 @@ pub fn parse_variables(values: &[String]) -> Result<std::collections::BTreeMap<S
 }
 pub fn write_stdout(text: &str) -> Result<()> {
     use std::io::Write;
+    crate::limits::check_text(text, "stdout payload")?;
     let mut output = std::io::stdout().lock();
     output.write_all(text.as_bytes())?;
     output.flush()?;
     Ok(())
 }
 pub fn read_input(argument: Option<&str>) -> Result<String> {
-    use std::io::{IsTerminal, Read};
+    use std::io::IsTerminal;
+    if let Some(argument) = argument {
+        crate::limits::check_text(argument, "input argument")?;
+    }
     let mut bytes = Vec::new();
     if !std::io::stdin().is_terminal() {
-        std::io::stdin().read_to_end(&mut bytes)?;
+        bytes = crate::limits::read(std::io::stdin().lock(), crate::limits::TEXT_BYTES, "stdin")?;
     }
     if argument.is_some() && !bytes.is_empty() {
         return Err(fail(
@@ -109,6 +113,11 @@ pub fn read_input(argument: Option<&str>) -> Result<String> {
 }
 pub fn error_code(error: &anyhow::Error) -> i32 {
     if error
+        .chain()
+        .any(|cause| cause.downcast_ref::<crate::limits::LimitError>().is_some())
+    {
+        2
+    } else if error
         .downcast_ref::<crate::persistence::ConflictError>()
         .is_some()
     {

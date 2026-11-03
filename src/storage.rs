@@ -316,6 +316,7 @@ impl Storage {
     }
 
     pub fn parse_prompt_content(&self, content: &str) -> Result<(PromptMetadata, String)> {
+        crate::limits::check_text(content, "prompt text")?;
         let Some(first_end) = content.find('\n') else {
             return Ok((PromptMetadata::default(), content.to_string()));
         };
@@ -330,6 +331,12 @@ impl Storage {
                 .unwrap_or(content.len());
             if content[position..end].trim_end_matches('\r') == "---" {
                 let yaml = &content[first_end + 1..position];
+                crate::limits::check_len(
+                    yaml.len(),
+                    crate::limits::FRONTMATTER_BYTES,
+                    "YAML frontmatter",
+                )?;
+                crate::limits::validate_yaml_expansion(yaml)?;
                 let value: serde_yaml::Value =
                     serde_yaml::from_str(yaml).context("invalid YAML frontmatter")?;
                 if !value.is_mapping() {
@@ -390,6 +397,11 @@ impl Storage {
                 }
                 return Ok((metadata, content[start..].to_string()));
             }
+            crate::limits::check_len(
+                end - (first_end + 1),
+                crate::limits::FRONTMATTER_BYTES,
+                "YAML frontmatter",
+            )?;
             if end == content.len() {
                 break;
             }
@@ -399,8 +411,17 @@ impl Storage {
     }
 
     pub fn serialize_prompt(metadata: &PromptMetadata, body: &str) -> Result<Vec<u8>> {
+        crate::limits::check_text(body, "prompt body")?;
         crate::template::validate_declarations(&metadata.vars)?;
-        Ok(format!("---\n{}---\n\n{}", serde_yaml::to_string(metadata)?, body).into_bytes())
+        let mut writer =
+            crate::limits::Writer::new(crate::limits::FRONTMATTER_BYTES, "YAML frontmatter");
+        let result = serde_yaml::to_writer(&mut writer, metadata);
+        let yaml = writer.finish(result)?;
+        let mut text = String::new();
+        for part in ["---\n", std::str::from_utf8(&yaml)?, "---\n\n", body] {
+            crate::limits::push_str(&mut text, part, "serialized prompt")?;
+        }
+        Ok(text.into_bytes())
     }
 
     fn validate_raw(&self, bytes: &[u8]) -> Result<()> {
@@ -738,11 +759,16 @@ impl Storage {
     }
 
     pub fn list_prompts(&self) -> Result<Vec<String>> {
+        self.list_prompts_with_limit(crate::limits::IMPORT_BYTES)
+    }
+
+    fn list_prompts_with_limit(&self, limit: usize) -> Result<Vec<String>> {
         if !self.base_dir.exists() {
             return Ok(Vec::new());
         }
         let root = Directory::open(&self.base_dir, false)?;
         let mut prompts = Vec::new();
+        let mut budget = crate::limits::Budget::new(limit, "prompt library index");
         for (directory, prefix, recursive) in [
             ("prompts", "", false),
             ("banks", "", true),
@@ -753,7 +779,7 @@ impl Storage {
                 Err(error) if is_missing(&error) => continue,
                 Err(error) => return Err(error),
             };
-            Self::collect_prompts(&directory, prefix, recursive, &mut prompts)?;
+            Self::collect_prompts(&directory, prefix, recursive, &mut prompts, &mut budget)?;
         }
         prompts.sort();
         prompts.dedup();
@@ -765,8 +791,31 @@ impl Storage {
         prefix: &str,
         recursive: bool,
         result: &mut Vec<String>,
+        budget: &mut crate::limits::Budget,
     ) -> Result<()> {
-        for entry in directory.entries()? {
+        // Keep the checked directory traversal, without a call-stack frame per bank level.
+        struct Frame {
+            directory: Directory,
+            prefix: String,
+            recursive: bool,
+            entries: std::vec::IntoIter<std::ffi::OsString>,
+        }
+        budget.add(2 * std::mem::size_of::<Frame>())?;
+        budget.add(prefix.len())?;
+        budget.add(directory.path().as_os_str().as_encoded_bytes().len())?;
+        let mut frames = vec![Frame {
+            directory: directory.descend(Path::new(""), false)?,
+            prefix: prefix.into(),
+            recursive,
+            entries: directory.entries_budgeted(budget)?.into_iter(),
+        }];
+        while let Some(frame) = frames.last_mut() {
+            let Some(entry) = frame.entries.next() else {
+                frames.pop();
+                continue;
+            };
+            let directory = &frame.directory;
+            let prefix = &frame.prefix;
             let text = entry
                 .to_str()
                 .context("prompt filename is not valid UTF-8")?;
@@ -777,23 +826,39 @@ impl Storage {
                 format!("cannot inspect {}", directory.path().join(&entry).display())
             })?;
             if metadata.is_dir() {
-                if recursive {
+                if frame.recursive {
                     Self::validate_component(text)?;
+                    budget.add(2 * std::mem::size_of::<Frame>())?;
+                    budget.add(prefix.len() + text.len() + 1)?;
+                    budget.add(
+                        directory.path().as_os_str().as_encoded_bytes().len()
+                            + entry.as_encoded_bytes().len()
+                            + 1,
+                    )?;
                     let prefix = if prefix.is_empty() || prefix == "@" {
                         format!("{prefix}{text}")
                     } else {
                         format!("{prefix}/{text}")
                     };
-                    Self::collect_prompts(&directory.child(&entry, false)?, &prefix, true, result)?;
+                    let directory = directory.child(&entry, false)?;
+                    let entries = directory.entries_budgeted(budget)?.into_iter();
+                    frames.push(Frame {
+                        directory,
+                        prefix,
+                        recursive: true,
+                        entries,
+                    });
                 }
             } else if metadata.is_file()
                 && Path::new(&entry).extension() == Some(OsStr::new("md"))
-                && !(recursive && (prefix.is_empty() || prefix == "@"))
+                && !(frame.recursive && (prefix.is_empty() || prefix == "@"))
             {
                 let stem = Path::new(&entry)
                     .file_stem()
                     .and_then(OsStr::to_str)
                     .context("prompt name is not valid UTF-8")?;
+                budget.add(prefix.len() + stem.len() + usize::from(!prefix.is_empty()))?;
+                budget.add(2 * std::mem::size_of::<String>())?;
                 let name = if prefix.is_empty() {
                     stem.to_string()
                 } else {
@@ -1035,6 +1100,39 @@ Provide the refactored code with explanations."#,
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn aggregate_name_index_budget_keeps_all_names_or_returns_an_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().join("library");
+        let storage = Storage::new_with_base(base.clone()).unwrap();
+        for name in [
+            "prompts/plain.md",
+            "banks/work/nested/review.md",
+            "teams/team/meeting.md",
+        ] {
+            let file = base.join(name);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, b"untouched note").unwrap();
+        }
+        assert_eq!(
+            storage.list_prompts_with_limit(8192).unwrap(),
+            vec!["@team/meeting", "plain", "work/nested/review"]
+        );
+        let error = storage.list_prompts_with_limit(768).unwrap_err();
+        assert!(error
+            .chain()
+            .any(|cause| cause.downcast_ref::<crate::limits::LimitError>().is_some()));
+        for name in [
+            "prompts/plain.md",
+            "banks/work/nested/review.md",
+            "teams/team/meeting.md",
+        ] {
+            assert_eq!(fs::read(base.join(name)).unwrap(), b"untouched note");
+        }
+        let empty = Storage::new_with_base(temp.path().join("empty")).unwrap();
+        fs::create_dir_all(empty.base_dir()).unwrap();
+        assert!(empty.list_prompts_with_limit(0).unwrap().is_empty());
+    }
 
     fn store() -> (tempfile::TempDir, Storage) {
         let temp = tempfile::tempdir().unwrap();

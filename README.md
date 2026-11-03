@@ -8,16 +8,16 @@ A local-first prompt toolkit for your terminal. Find, compose, and reuse prompts
 
 Meet **Byt** (pronounced *byte*).
 
-## Install this candidate
+## Install
 
-This checkout contains the **unreleased 0.3.0 comeback candidate**. Installing `prompthive` from crates.io still selects a published release, which has different behavior.
-
-With a Rust toolchain installed, run from this checkout:
+Download and extract a [v0.4.0 source archive from GitHub](https://github.com/joryeugene/prompthive/releases/tag/v0.4.0), then run these commands from its directory:
 
 ```sh
 cargo install --path . --locked
 ph --version
 ```
+
+This is a GitHub-only source release. `cargo install prompthive` uses crates.io and does not install this release. An existing installation does not update automatically; run the source command above to replace it.
 
 The default build includes the terminal picker. For a smaller build without it, add `--no-default-features`; exact-name commands and pipelines remain available.
 
@@ -25,7 +25,7 @@ On Linux, clipboard copying needs `wl-copy` on Wayland, or `xclip` or `xsel` on 
 
 ## Five actions to remember
 
-Start with `ph` in a terminal. Type to search, inspect the full name and preview, press Enter to use, or Escape to cancel. No selection is copied before you accept it. With no saved prompts, the picker offers a creation example.
+Start with `ph` in a terminal. Type to search, inspect the full name and preview, press Enter to use, or Escape to cancel. If a chosen template needs declared values, fill only the missing fields, inspect the final preview, and press Enter to finish. Prompts with all values already available keep the single Enter-to-use path. No selection is copied before you accept it. With no saved prompts, the picker offers a creation example.
 
 | Action | Short | Long | Example |
 | --- | --- | --- | --- |
@@ -42,9 +42,13 @@ ph n review 'Review this code. Explain concrete defects: {input}'
 git diff | ph u review | less
 printf '%s\n' 'Notes from the design meeting' | ph n notes/meeting
 ph e notes/meeting
+ph e                 # Search for a saved prompt to edit
+ph n notes/today     # In a terminal, open your editor for a new note
 ```
 
 Names are case-sensitive. A case-insensitive filesystem cannot store case-only variants side by side; Prompthive rejects a differently cased selector and refuses to overwrite the existing file. `work/review` and `personal/review` are different prompts. Use exact, complete names in scripts. A prefix or fuzzy query requires a visible preview and confirmation; in a pipe it fails with candidate names on stderr. Adding another prompt never silently changes the meaning of an exact name. Retained short codes require a verified compatibility map; they are optional, and a real canonical name always wins.
+
+`ph e` without a name opens a picker labeled for editing when both stdin and stdout are terminals; it never copies the selected prompt. `ph e NAME` still requires an exact name. `ph n NAME` without text opens `$EDITOR` only when both streams are terminals. Leaving that new document empty, cancelling, or failing the editor creates no note. Use an explicit empty argument (`ph n NAME ''`) to create an empty note deliberately. Piped text and noninteractive commands retain their existing behavior.
 
 Other actions are `s`/`show`, `l`/`ls`, `r`/`rename`, `d`/`delete`, `t`/`tui`, and `x`/`clean`. Run `ph --help` or `ph ACTION --help` for options. The action `s` shows original text; the flag `-s NAME` saves output:
 
@@ -94,7 +98,7 @@ Explain this {lang} change in a {tone} tone: {input}
 git diff | ph u work/explain -v lang=Rust -v tone=direct
 ```
 
-`null` requires a value; a string supplies a default. Unknown, repeated, or missing values fail before output. Undeclared braces remain ordinary text, and `{{lang}}` produces literal `{lang}`. Explicit `{env:NAME}` reads that environment variable or fails if it is absent. Prompthive does not load `.env` files. Date/time context is captured once per invocation: `time` and `datetime` use local time; `date` and `iso_date` use UTC, and `timestamp` is Unix seconds.
+`null` requires a supplied value; a string supplies a default. The interactive picker asks only for missing required values. Tab and Shift-Tab move between fields; Enter commits a value (including an explicit empty value), then shows the final preview. The rendered buffer is used unchanged after confirmation; an explicit `--edit` adds your requested editor review before output. Escape or Ctrl-C cancels without changing files or clipboard. Paste keeps Unicode, whitespace, and newlines; inserted values are never saved as defaults. Exact-name and noninteractive calls still use `-v NAME=value` and never ask questions. Unknown, repeated, or missing values fail before output. Undeclared braces remain ordinary text, and `{{lang}}` produces literal `{lang}`. Explicit `{env:NAME}` reads that environment variable or fails if it is absent. Prompthive does not load `.env` files. Date/time context is captured once per invocation: `time` and `datetime` use local time; `date` and `iso_date` use UTC, and `timestamp` is Unix seconds.
 
 Composition is a left-to-right template chain. If `a` contains `A {input}` and `b` contains `B {input}`, `ph c a,b context` produces `B A context`. A stage without an input slot appends incoming text after two newlines. Every stage and required variable is checked before any destination changes. Explicit `-v` values apply to every stage declaring that name; other defaults remain local to each stage.
 
@@ -116,6 +120,12 @@ ph import ./prompt-backup
 ```
 
 Export creates a new directory with raw Markdown, a checksummed manifest, and verified compatibility bindings. It excludes credentials, runtime configuration, and history. Import skips existing-file conflicts by default. `--force` backs up and replaces a conflicting prompt; `--version` keeps both under different names. A deleted name with recovery history remains reserved: use `--force` to restore it, `--version` for a new name, or `--skip` to leave it alone. A skipped or renamed prompt cannot activate an imported binding against unrelated existing content. A portable export is useful for transferring prompts; back up the full store separately to retain recovery history.
+
+## Safety budgets
+
+Reads, input, edited documents, and rendered output have a 32 MiB text budget. YAML frontmatter and editor configuration have a 1 MiB budget. Import/export batches, composition preparation, and library indexes have a 128 MiB aggregate budget; compiled templates and diff line indexes are limited to 65,536 segments or lines. Expanded YAML metadata is checked before building its value tree, including alias expansion. Oversized content is rejected before a destination changes. Nothing is truncated, migrated, or automatically deleted. Keep an external backup, including large notes you may need to edit outside these limits.
+
+These limits do not resolve the retained YAML parser's maintenance advisory or make Prompthive a sandbox for hostile inputs. Real Wayland, macOS, and Windows desktop clipboard behavior still needs separate native acceptance; use text output when copying is unavailable.
 
 ## Moving from 0.2.8
 

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+if [[ "${OS:-}" == Windows_NT ]]; then
+  echo 'SKIP: POSIX PTY interactive suite; native Windows terminal acceptance remains separate.'
+  exit 0
+fi
+exec python3 "$root/scripts/qa/interactive.py" "$@"

@@ -13,9 +13,18 @@ pub fn edit_content(content: &str) -> Result<String> {
     let status =
         crate::commands::configuration::get_editor_command_for_file(staged.path())?.status()?;
     if !status.success() {
+        if status.code() == Some(130) {
+            return Err(crate::commands::common::fail(
+                130,
+                "Editor cancelled; nothing was saved.",
+            ));
+        }
         bail!("editor exited unsuccessfully; the stored prompt was unchanged");
     }
-    Ok(std::fs::read_to_string(staged.path())?)
+    Ok(String::from_utf8(crate::limits::read_file(
+        staged.path(),
+        "edited document",
+    )?)?)
 }
 pub fn edit_prompt(storage: &Storage, name: &str) -> Result<()> {
     let original = storage.read_raw(name)?;

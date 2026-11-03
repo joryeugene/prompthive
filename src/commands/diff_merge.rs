@@ -36,9 +36,9 @@ pub fn handle_diff_with_force(
     let (_, content1) = storage.read_prompt(prompt1)?;
     let (_, content2) = storage.read_prompt(prompt2)?;
     let diff = match format {
-        "unified" => generate_unified_diff(prompt1, &content1, prompt2, &content2, context),
+        "unified" => generate_unified_diff(prompt1, &content1, prompt2, &content2, context)?,
         "side-by-side" | "side" => {
-            generate_side_by_side_diff(prompt1, &content1, prompt2, &content2)
+            generate_side_by_side_diff(prompt1, &content1, prompt2, &content2)?
         }
         "brief" => generate_brief_diff(prompt1, &content1, prompt2, &content2),
         _ => bail!("unsupported diff format '{format}'; use unified, side-by-side, or brief"),
@@ -83,13 +83,9 @@ pub fn handle_merge(
     }
     target_metadata.updated_at = Some(chrono::Utc::now().to_rfc3339());
     if preview {
-        let mut stdout = io::stdout().lock();
-        write!(
-            stdout,
-            "Replace {target_prompt} with the body of {source_prompt}:\n\n{source_body}"
-        )?;
-        stdout.flush()?;
-        return Ok(());
+        let mut text = format!("Replace {target_prompt} with the body of {source_prompt}:\n\n");
+        crate::limits::push_str(&mut text, &source_body, "merge preview")?;
+        return super::common::write_stdout(&text);
     }
     let needs_frontmatter = target_text.starts_with("---\n")
         || target_text.starts_with("---\r\n")
@@ -104,12 +100,18 @@ pub fn handle_merge(
     Ok(())
 }
 
-fn diff_line(prefix: char, line: &str, result: &mut String) {
+fn diff_line(prefix: char, line: &str, result: &mut String) -> Result<()> {
+    crate::limits::check_len(
+        result.len().saturating_add(prefix.len_utf8()),
+        crate::limits::TEXT_BYTES,
+        "diff output",
+    )?;
     result.push(prefix);
-    result.push_str(line);
+    crate::limits::push_str(result, line, "diff output")?;
     if !line.ends_with('\n') {
-        result.push_str("\n\\ No newline at end of file\n");
+        crate::limits::push_str(result, "\n\\ No newline at end of file\n", "diff output")?;
     }
+    Ok(())
 }
 
 fn unified_range(start: usize, count: usize) -> String {
@@ -128,9 +130,13 @@ fn generate_unified_diff(
     name2: &str,
     content2: &str,
     context: usize,
-) -> String {
+) -> Result<String> {
     if content1 == content2 {
-        return String::new();
+        return Ok(String::new());
+    }
+    // Bound line indexes as well as payload bytes before allocating their vectors.
+    for text in [content1, content2] {
+        crate::limits::check_len(text.lines().count(), 65_536, "diff line count")?;
     }
     let before: Vec<_> = content1.split_inclusive('\n').collect();
     let after: Vec<_> = content2.split_inclusive('\n').collect();
@@ -158,18 +164,18 @@ fn generate_unified_diff(
         unified_range(start, new_end - start)
     );
     for line in &before[start..common_prefix] {
-        diff_line(' ', line, &mut result);
+        diff_line(' ', line, &mut result)?;
     }
     for line in &before[common_prefix..old_change_end] {
-        diff_line('-', line, &mut result);
+        diff_line('-', line, &mut result)?;
     }
     for line in &after[common_prefix..new_change_end] {
-        diff_line('+', line, &mut result);
+        diff_line('+', line, &mut result)?;
     }
     for line in &before[old_change_end..old_end] {
-        diff_line(' ', line, &mut result);
+        diff_line(' ', line, &mut result)?;
     }
-    result
+    Ok(result)
 }
 
 fn display_fragment(line: &str) -> String {
@@ -180,16 +186,28 @@ fn display_fragment(line: &str) -> String {
     }
 }
 
-fn generate_side_by_side_diff(name1: &str, content1: &str, name2: &str, content2: &str) -> String {
+fn generate_side_by_side_diff(
+    name1: &str,
+    content1: &str,
+    name2: &str,
+    content2: &str,
+) -> Result<String> {
+    for text in [content1, content2] {
+        crate::limits::check_len(text.lines().count(), 65_536, "diff line count")?;
+    }
     let before: Vec<_> = content1.lines().collect();
     let after: Vec<_> = content2.lines().collect();
     let mut result = format!("{name1:<40} | {name2}\n");
     for index in 0..before.len().max(after.len()) {
         let left = display_fragment(before.get(index).copied().unwrap_or(""));
         let right = display_fragment(after.get(index).copied().unwrap_or(""));
-        result.push_str(&format!("{left:<40} | {right}\n"));
+        crate::limits::push_str(
+            &mut result,
+            &format!("{left:<40} | {right}\n"),
+            "diff output",
+        )?;
     }
-    result
+    Ok(result)
 }
 
 fn generate_brief_diff(name1: &str, content1: &str, name2: &str, content2: &str) -> String {
@@ -229,7 +247,8 @@ mod tests {
 
     #[test]
     fn test_generate_side_by_side_diff() {
-        let result = generate_side_by_side_diff("p1", "line1\nline2", "p2", "line1\nchanged");
+        let result =
+            generate_side_by_side_diff("p1", "line1\nline2", "p2", "line1\nchanged").unwrap();
         assert!(result.contains("p1"));
         assert!(result.contains("p2"));
         assert!(result.contains("line1"));
@@ -237,7 +256,8 @@ mod tests {
 
     #[test]
     fn test_generate_unified_diff() {
-        let result = generate_unified_diff("p1", "line1\nline2", "p2", "line1\nchanged", 1);
+        let result =
+            generate_unified_diff("p1", "line1\nline2", "p2", "line1\nchanged", 1).unwrap();
         assert!(result.contains("---"));
         assert!(result.contains("+++"));
         assert!(result.contains("@@"));
@@ -246,26 +266,38 @@ mod tests {
     #[test]
     fn unified_diff_has_valid_ranges_for_insertions_deletions_and_missing_newline() {
         assert_eq!(
-            generate_unified_diff("a", "", "b", "one\n", 0),
+            generate_unified_diff("a", "", "b", "one\n", 0).unwrap(),
             "--- a\n+++ b\n@@ -0,0 +1 @@\n+one\n"
         );
         assert_eq!(
-            generate_unified_diff("a", "one\n", "b", "", 0),
+            generate_unified_diff("a", "one\n", "b", "", 0).unwrap(),
             "--- a\n+++ b\n@@ -1 +0,0 @@\n-one\n"
         );
         assert_eq!(
-            generate_unified_diff("a", "same\nold", "b", "same\nnew\n", 0),
+            generate_unified_diff("a", "same\nold", "b", "same\nnew\n", 0).unwrap(),
             "--- a\n+++ b\n@@ -2 +2 @@\n-old\n\\ No newline at end of file\n+new\n"
         );
-        assert!(generate_unified_diff("a", "same\n", "b", "same\n", 1).is_empty());
+        assert!(generate_unified_diff("a", "same\n", "b", "same\n", 1)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn side_by_side_handles_long_unicode_lines_without_slicing_bytes() {
         let text = "🦀".repeat(80);
-        let result = generate_side_by_side_diff("a", &text, "b", &text);
+        let result = generate_side_by_side_diff("a", &text, "b", &text).unwrap();
         assert!(result.contains(&format!("{}..", "🦀".repeat(36))));
         assert!(!result.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn excessive_diff_structure_or_output_is_rejected_before_emission() {
+        let lines = "x\n".repeat(65_537);
+        assert!(generate_unified_diff("a", &lines, "b", "changed", 3).is_err());
+        assert!(generate_side_by_side_diff("a", &lines, "b", "changed").is_err());
+        let boundary = "x".repeat(crate::limits::TEXT_BYTES);
+        assert!(generate_unified_diff("a", &boundary, "b", "changed", 0).is_err());
+        assert!(generate_unified_diff("a", "below\n", "b", "changed\n", 0).is_ok());
     }
 
     #[test]

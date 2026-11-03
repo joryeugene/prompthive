@@ -22,7 +22,13 @@ pub fn load_editor_config() -> Result<EditorConfig> {
     }
     let path = Storage::new()?.base_dir().join("config.toml");
     if path.exists() {
-        let config: toml::Value = std::fs::read_to_string(path)?.parse().map_err(|_| {
+        let bytes = crate::limits::read_file(path, "editor configuration")?;
+        crate::limits::check_len(
+            bytes.len(),
+            crate::limits::FRONTMATTER_BYTES,
+            "editor configuration",
+        )?;
+        let config: toml::Value = std::str::from_utf8(&bytes)?.parse().map_err(|_| {
             anyhow::anyhow!(
                 "invalid local config.toml; fix its TOML syntax (the file was unchanged)"
             )
