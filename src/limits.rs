@@ -70,15 +70,17 @@ pub fn read(reader: impl Read, limit: usize, label: &str) -> Result<Vec<u8>> {
         if count == 0 {
             return Ok(bytes);
         }
-        let capacity = bytes
-            .capacity()
-            .saturating_mul(2)
-            .max(8192)
-            .max(bytes.len() + count)
-            .min(limit);
-        bytes
-            .try_reserve_exact(capacity - bytes.len())
-            .context("cannot allocate bounded input buffer")?;
+        if bytes.len() + count > bytes.capacity() {
+            let capacity = bytes
+                .capacity()
+                .saturating_mul(2)
+                .max(8192)
+                .max(bytes.len() + count)
+                .min(limit);
+            bytes
+                .try_reserve_exact(capacity - bytes.len())
+                .context("cannot allocate bounded input buffer")?;
+        }
         bytes.extend_from_slice(&chunk[..count]);
     }
     let extra = loop {
@@ -120,14 +122,16 @@ pub fn push_str(target: &mut String, text: &str, label: &str) -> Result<()> {
         .checked_add(text.len())
         .ok_or_else(|| exceeded(label, TEXT_BYTES))?;
     check_len(size, TEXT_BYTES, label)?;
-    let capacity = target
-        .capacity()
-        .saturating_mul(2)
-        .max(size)
-        .min(TEXT_BYTES);
-    target
-        .try_reserve_exact(capacity - target.len())
-        .context("cannot allocate bounded output buffer")?;
+    if size > target.capacity() {
+        let capacity = target
+            .capacity()
+            .saturating_mul(2)
+            .max(size)
+            .min(TEXT_BYTES);
+        target
+            .try_reserve_exact(capacity - target.len())
+            .context("cannot allocate bounded output buffer")?;
+    }
     target.push_str(text);
     Ok(())
 }
@@ -176,16 +180,18 @@ impl std::io::Write for Writer {
             self.exceeded = true;
             return Err(std::io::Error::other("serialization exceeds safety limit"));
         }
-        let capacity = self
-            .bytes
-            .capacity()
-            .saturating_mul(2)
-            .max(8192)
-            .max(self.bytes.len() + bytes.len())
-            .min(self.limit);
-        self.bytes
-            .try_reserve_exact(capacity - self.bytes.len())
-            .map_err(std::io::Error::other)?;
+        if self.bytes.len() + bytes.len() > self.bytes.capacity() {
+            let capacity = self
+                .bytes
+                .capacity()
+                .saturating_mul(2)
+                .max(8192)
+                .max(self.bytes.len() + bytes.len())
+                .min(self.limit);
+            self.bytes
+                .try_reserve_exact(capacity - self.bytes.len())
+                .map_err(std::io::Error::other)?;
+        }
         self.bytes.extend_from_slice(bytes);
         Ok(bytes.len())
     }
@@ -215,6 +221,30 @@ impl Budget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn repeated_small_chunks_do_not_reserve_the_whole_budget() {
+        let bytes = read(
+            std::io::Cursor::new(vec![b'x'; 128 * 1024]),
+            TEXT_BYTES,
+            "chunked input",
+        )
+        .unwrap();
+        assert!(bytes.capacity() <= 256 * 1024, "{}", bytes.capacity());
+        let mut text = String::new();
+        for _ in 0..128 {
+            push_str(&mut text, "x", "typed input").unwrap();
+        }
+        assert!(text.capacity() <= 256, "{}", text.capacity());
+        let mut writer = Writer::new(FRONTMATTER_BYTES, "metadata");
+        for _ in 0..128 {
+            std::io::Write::write_all(&mut writer, b"x").unwrap();
+        }
+        assert!(
+            writer.bytes.capacity() <= 8192,
+            "{}",
+            writer.bytes.capacity()
+        );
+    }
     #[test]
     fn streaming_boundaries_accept_exact_bytes_and_reject_an_extra_byte() {
         for size in [0, 3, 4] {
