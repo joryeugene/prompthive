@@ -142,6 +142,7 @@ def cancellation_case(binary, bash, timeout, key):
     import select
     import struct
     import termios
+    from terminal_session import TerminalChild
     with tempfile.TemporaryDirectory(prefix='ph-cancel-') as directory:
         root = Path(directory)
         store = root / 'store'
@@ -154,12 +155,8 @@ def cancellation_case(binary, bash, timeout, key):
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 80, 0, 0))
         before_modes = termios.tcgetattr(slave)
-        def control_terminal():
-            os.setsid()
-            fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
-        child = subprocess.Popen([bash, '--noprofile', '--norc', '-o', 'pipefail', '-c', SHELL_SETUP + 'printf ctx | ph'],
-                                 cwd=root, env=env, stdin=slave, stdout=slave, stderr=slave,
-                                 preexec_fn=control_terminal, pass_fds=(slave,))
+        child = TerminalChild([bash, '--noprofile', '--norc', '-o', 'pipefail', '-c', SHELL_SETUP + 'printf ctx | ph'],
+                              slave=slave, cwd=root, env=env, stdin=slave, stdout=slave, stderr=slave)
         output = bytearray()
         sent = False
         timed_out = False
@@ -173,7 +170,7 @@ def cancellation_case(binary, bash, timeout, key):
                     sent = True
             if child.poll() is None:
                 timed_out = True
-                os.killpg(child.pid, signal.SIGKILL)
+                child.send_signal(signal.SIGKILL)
             child.wait(timeout=2)
             checks = {'picker-observed': sent, 'exit130': child.returncode == 130,
                       'no-hang': not timed_out, 'store-unchanged': snapshot(store) == before_files,
@@ -183,9 +180,7 @@ def cancellation_case(binary, bash, timeout, key):
                     'exit': child.returncode, 'checks': checks, 'passed': all(checks.values()),
                     'terminal_sha256': hashlib.sha256(output).hexdigest(), 'timeout_seconds': timeout}
         finally:
-            if child.poll() is None:
-                os.killpg(child.pid, signal.SIGKILL)
-                child.wait(timeout=2)
+            child.close()
             os.close(master)
             os.close(slave)
 

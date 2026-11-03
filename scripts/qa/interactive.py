@@ -3,6 +3,7 @@
 import argparse, hashlib, json, os, pathlib, re, select, signal, struct
 import subprocess, sys, tempfile, termios, time, fcntl, pty
 from vt_decode import VtScreen
+from terminal_session import TerminalChild
 
 P = argparse.ArgumentParser(description=__doc__)
 P.add_argument('binary', type=pathlib.Path)
@@ -44,7 +45,6 @@ def case(name):
         width,height=(40,18) if name in ['guided_narrow','long_identity'] else (120,40) if name=='guided_wide' else (80,24)
         master,slave=pty.openpty(); fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',height,width,0,0))
         before_modes=termios.tcgetattr(slave); before=hashes(store); screen=VtScreen(width,height); raw=bytearray(); frames=[]; events=[]
-        def control(): os.setsid(); fcntl.ioctl(slave,termios.TIOCSCTTY,0)
         args=['u','-f','result.txt']; query='exp'; expected=b'G [Rust]|[brief]|[]'; expected_code=0
         if name in ['edit_search','edit_repair']: args=['e'];query='legacy' if name=='edit_search' else 'broken'
         if name.startswith('new_'):args=['n','notes/today']
@@ -70,8 +70,8 @@ def case(name):
         piped=name=='piped_context'
         if piped:expected=b'G [Rust]|[brief]|[PIPE {literal}\n]'
         stderr=(root/'stderr').open('wb')
-        child=subprocess.Popen([str(BINARY),*args],stdin=subprocess.PIPE if piped else slave,stdout=slave,stderr=stderr,
-            env=env,cwd=root,preexec_fn=control,pass_fds=(slave,))
+        child=TerminalChild([str(BINARY),*args],slave=slave,stdin=subprocess.PIPE if piped else slave,stdout=slave,stderr=stderr,
+            env=env,cwd=root)
         if piped:child.stdin.write(b'PIPE {literal}\n');child.stdin.close()
         def drain(wait=.05):
             if select.select([master],[],[],wait)[0]:
@@ -144,8 +144,10 @@ def case(name):
             if name in ['plain_fast','supplied_fast','default_fast']:assert b'Fill required values' not in raw and b'Preview rendered prompt' not in raw
         except Exception as error:failure=repr(error)
         finally:
-            if child.poll() is None:os.killpg(child.pid,signal.SIGKILL);child.wait(timeout=2)
-            if after_modes is None:after_modes=termios.tcgetattr(slave)
+            if after_modes is None:
+                try:after_modes=termios.tcgetattr(slave)
+                except termios.error as error:failure=failure or repr(error)
+            child.close()
             stderr.close();os.close(master);os.close(slave)
         result={'case':name,'argv':args,'passed':failure is None,'error':failure,'exit':child.returncode,'events_hex':events,
                 'injected_bytes':sum(len(bytes.fromhex(v)) for v in events),'frames':frames,'terminal_restored':after_modes==before_modes,

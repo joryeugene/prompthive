@@ -12,6 +12,7 @@ cargo test --locked --offline --no-default-features
 cargo clippy --locked --offline --all-targets -- -D warnings
 cargo clippy --locked --offline --all-targets --no-default-features -- -D warnings
 cargo build --locked --offline --bin ph
+python3 scripts/qa/test_terminal_session.py
 
 candidate_dir=${CARGO_TARGET_DIR:-"$repo_root/target"}
 if [[ "$candidate_dir" != /* && ! "$candidate_dir" =~ ^[[:alpha:]]: ]]; then
