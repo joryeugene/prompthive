@@ -96,8 +96,9 @@ class TerminalChild:
             self.supervisor.kill()
 
     def close(self):
-        # Call only after reading the untouched terminal modes. Ending the
-        # session leader earlier revokes the controlling PTY on Darwin.
+        # Call after observing modes/output and closing the observer's PTY
+        # descriptors. Darwin's leader teardown waits for queued output, so
+        # keeping the unread master open while reaping can deadlock.
         # Retire the whole owned group, including descendants of an exited
         # shell that deliberately ignore hangup, before releasing the keeper.
         self.kill_session()

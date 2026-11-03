@@ -180,9 +180,9 @@ def cancellation_case(binary, bash, timeout, key):
                     'exit': child.returncode, 'checks': checks, 'passed': all(checks.values()),
                     'terminal_sha256': hashlib.sha256(output).hexdigest(), 'timeout_seconds': timeout}
         finally:
-            child.close()
             os.close(master)
             os.close(slave)
+            child.close()
 
 
 def main():

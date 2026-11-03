@@ -34,16 +34,21 @@ class TerminalSessionContract(unittest.TestCase):
                 print('PTY mode difference:', [(i, a, b) for i, (a, b) in enumerate(zip(before, after)) if a != b], file=sys.stderr)
             return result, before == after
         finally:
-            if child is not None:
-                child.close()
             os.close(master)
             os.close(slave)
+            if child is not None:
+                child.close()
 
     def test_restored_modes_pass(self):
         self.assertEqual(self.exercise('import termios,tty; old=termios.tcgetattr(1); tty.setraw(1); termios.tcsetattr(1,termios.TCSANOW,old)'), (0, True))
 
     def test_identity_roundtrip_preserves_fixture(self):
         self.assertEqual(self.exercise('import termios; old=termios.tcgetattr(1); termios.tcsetattr(1,termios.TCSANOW,old)'), (0, True))
+
+    def test_unread_output_does_not_deadlock_teardown(self):
+        started=time.monotonic()
+        self.assertEqual(self.exercise('import sys; sys.stdout.write("x"*1024); sys.stdout.flush()'), (0, True))
+        self.assertLess(time.monotonic()-started,8)
 
     def test_dirty_modes_are_rejected_after_successful_exit(self):
         self.assertEqual(self.exercise('import tty; tty.setraw(1)'), (0, False))

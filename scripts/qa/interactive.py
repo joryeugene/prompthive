@@ -147,8 +147,8 @@ def case(name):
             if after_modes is None:
                 try:after_modes=terminal_modes(slave)
                 except termios.error as error:failure=failure or repr(error)
-            child.close()
             stderr.close();os.close(master);os.close(slave)
+            child.close()
         result={'case':name,'argv':args,'passed':failure is None,'error':failure,'exit':child.returncode,'events_hex':events,
                 'injected_bytes':sum(len(bytes.fromhex(v)) for v in events),'frames':frames,'terminal_restored':after_modes==before_modes,
                 'observed_payload_hex':None if actual is None else actual.hex(),'stderr':(root/'stderr').read_text(encoding='utf-8',errors='replace')}
