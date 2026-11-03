@@ -91,9 +91,13 @@ pub fn pick_prompt_for(
     query: &str,
     intent: PickerIntent,
 ) -> Result<Option<String>> {
-    pick_with(storage, query, intent, |name, _, _| {
-        Ok(Some(name.to_owned()))
-    })
+    pick_with(
+        storage,
+        query,
+        intent,
+        |_| None,
+        |name, _, _| Ok(Some(name.to_owned())),
+    )
 }
 
 /// Selection, missing values, and final preview share one terminal session.
@@ -115,6 +119,7 @@ where
         storage,
         query,
         PickerIntent::Use,
+        |name| Some(destination(name)),
         |name, terminal, interrupted| {
             let required = missing(name, supplied)?;
             if required.is_empty() {
@@ -138,6 +143,7 @@ fn pick_with<T>(
     storage: &Storage,
     query: &str,
     intent: PickerIntent,
+    destination: impl Fn(&str) -> Option<String>,
     selected: impl FnOnce(&str, &mut Screen, &Arc<AtomicBool>) -> Result<Option<T>>,
 ) -> Result<Option<T>> {
     if !interactive_supported() {
@@ -155,6 +161,9 @@ fn pick_with<T>(
         if interrupted.load(Ordering::Relaxed) {
             return Ok(None);
         }
+        state.destination = state
+            .selected()
+            .and_then(|entry| destination(&entry.prompt.name));
         terminal.draw(|frame| state.draw(frame))?;
         match poll_event(&interrupted)? {
             Some(Event::Key(key)) => match state.key(key) {
@@ -367,6 +376,7 @@ enum Decision {
 
 struct PickerState {
     intent: PickerIntent,
+    destination: Option<String>,
     entries: Vec<Entry>,
     filtered: Vec<usize>,
     query: String,
@@ -383,6 +393,7 @@ impl PickerState {
     fn new(entries: Vec<Entry>, query: &str) -> Self {
         let mut state = Self {
             intent: PickerIntent::Use,
+            destination: None,
             entries,
             filtered: Vec::new(),
             query: query.chars().filter(|c| !c.is_control()).collect(),
@@ -572,11 +583,11 @@ impl PickerState {
                     "Up/Down select  Enter use  Esc cancel"
                 }),
                 Line::from(if self.intent == PickerIntent::Edit {
-                    "Enter opens EDITOR; nothing copied"
-                } else if area.width >= 52 {
-                    "PgUp/PgDn preview  Default: copy; show if unavailable"
+                    "Enter opens EDITOR; nothing copied".to_owned()
+                } else if let Some(destination) = &self.destination {
+                    format!("{}; PgUp/PgDn preview", safe_text(destination))
                 } else {
-                    "Default: copy/show; PgUp/PgDn preview"
+                    "PgUp/PgDn preview".to_owned()
                 }),
                 Line::from(if area.width >= 44 {
                     COMMANDS
@@ -1062,6 +1073,17 @@ mod tests {
         assert!(!display_supported(None, false));
         assert!(!display_supported(Some("xterm-256color"), true));
         assert!(display_supported(Some("xterm-256color"), false));
+    }
+
+    #[test]
+    fn picker_shows_requested_destination_instead_of_a_copy_default() {
+        for (width, height) in [(40, 18), (80, 24), (120, 40)] {
+            let mut state = PickerState::new(vec![entry("review", "Body")], "");
+            state.destination = Some("Write result.txt".into());
+            let screen = painted(&mut state, width, height);
+            assert!(screen.contains("Write result.txt"));
+            assert!(!screen.contains("Default: copy"));
+        }
     }
 
     #[test]
