@@ -32,7 +32,7 @@ pub enum Commands {
         visible_alias = "u",
         after_help = "With terminal output, copy the rendered text; show it if copying is unavailable. Pipes and -q print only text. An explicit destination overrides this default.
 
-Input comes from INPUT or stdin, never both. Omitted input is empty for {input}; declared required variables still need -v NAME=value."
+Input comes from INPUT or stdin, never both. Omitted input is empty for {input}. The picker can collect missing declared values; exact-name commands use -v NAME=value."
     )]
     Use {
         /// Exact prompt name; omit to choose with a preview
@@ -66,7 +66,7 @@ Input comes from INPUT or stdin, never both. Omitted input is empty for {input};
         #[command(flatten)]
         destination: Destinations,
     },
-    /// Save a new prompt from text, stdin, or $EDITOR
+    /// Save text or stdin; with no text in a terminal, open $EDITOR
     #[command(visible_alias = "n")]
     New {
         name: String,
@@ -81,9 +81,12 @@ Input comes from INPUT or stdin, never both. Omitted input is empty for {input};
         #[command(flatten)]
         destination: Destinations,
     },
-    /// Edit the full local Markdown file using $EDITOR
+    /// Edit saved Markdown; omit NAME in a terminal to search
     #[command(visible_alias = "e")]
-    Edit { name: String },
+    Edit {
+        /// Exact name; omit with terminal stdin/stdout to choose a prompt
+        name: Option<String>,
+    },
     /// Find prompts by name or description
     #[command(visible_alias = "f")]
     Find {

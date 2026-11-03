@@ -75,6 +75,14 @@ def main():
                 check.append('--headless')
             subprocess.run(check, cwd=repo, check=True)
             observation = json.loads(result_path.read_text(encoding='utf-8'))
+            if not headless and os.name == 'posix':
+                interactive_path = temporary / 'interactive.json'
+                subprocess.run([sys.executable, str(repo / 'scripts/qa/interactive.py'), str(binary),
+                                '--report', str(interactive_path)], cwd=repo, check=True)
+                observation['interactive'] = json.loads(interactive_path.read_text(encoding='utf-8'))
+            else:
+                observation['interactive_exception'] = ('No-TUI build has no interactive flow.' if headless else
+                    'Native Windows Python lacks POSIX PTYs; native terminal acceptance remains separate.')
             observation['mode'] = mode
             observation['version'] = version
             observation['install_argv'] = command

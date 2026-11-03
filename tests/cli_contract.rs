@@ -1316,6 +1316,95 @@ fn editor_script(fixture: &Fixture, script: &str) -> PathBuf {
     path
 }
 
+#[cfg(unix)]
+#[test]
+fn new_editor_cancel_failure_and_conflict_create_no_surprise_note() {
+    let fixture = Fixture::new();
+    let marker = fixture.temporary.path().join("editor-ran");
+    let no_change = editor_script(&fixture, "exit 0");
+    let result = fixture.run_env(
+        &["n", "cancelled", "-e"],
+        b"",
+        &[("EDITOR", no_change.to_str().unwrap())],
+    );
+    assert_eq!(result.status.code(), Some(130));
+    assert!(!fixture.path("cancelled").exists());
+    // An explicitly empty argument retains its deliberate meaning.
+    let result = fixture.run_env(
+        &["n", "empty", "", "-e"],
+        b"",
+        &[("EDITOR", no_change.to_str().unwrap())],
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(fixture.success(&["s", "empty", "-q"], b"").stdout, b"");
+    let fails = editor_script(&fixture, "printf 'staged only' > \"$1\"; exit 9");
+    let result = fixture.run_env(
+        &["n", "failed", "-e"],
+        b"",
+        &[("EDITOR", fails.to_str().unwrap())],
+    );
+    assert_eq!(result.status.code(), Some(1));
+    assert!(!fixture.path("failed").exists());
+    let cancel = editor_script(&fixture, "exit 130");
+    let result = fixture.run_env(
+        &["n", "interrupted", "-e"],
+        b"",
+        &[("EDITOR", cancel.to_str().unwrap())],
+    );
+    assert_eq!(result.status.code(), Some(130));
+    assert!(!fixture.path("interrupted").exists());
+    fixture.raw("existing", "Untouched legacy note");
+    let launched = editor_script(&fixture, &format!("touch '{}'; exit 0", marker.display()));
+    let result = fixture.run_env(
+        &["n", "existing", "-e"],
+        b"",
+        &[("EDITOR", launched.to_str().unwrap())],
+    );
+    assert_eq!(result.status.code(), Some(2));
+    assert!(
+        !marker.exists(),
+        "conflicting name must be rejected before editor opens"
+    );
+    assert_eq!(
+        fs::read(fixture.path("existing")).unwrap(),
+        b"Untouched legacy note"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn headless_new_never_auto_edits_and_edit_without_name_never_prompts() {
+    let fixture = Fixture::new();
+    let marker = fixture.temporary.path().join("editor-ran");
+    let editor = editor_script(&fixture, &format!("touch '{}'; exit 0", marker.display()));
+    let result = fixture.run_env(&["e"], b"", &[("EDITOR", editor.to_str().unwrap())]);
+    assert_eq!(result.status.code(), Some(2));
+    assert!(result.stdout.is_empty());
+    let result = fixture.run_env(
+        &["n", "legacy-empty"],
+        b"",
+        &[("EDITOR", editor.to_str().unwrap())],
+    );
+    assert!(result.status.success());
+    assert!(fixture.path("legacy-empty").is_file());
+    let body = "  Pipe stays literal: {env:UNEXPANDED}\n\n";
+    let result = fixture.run_env(
+        &["n", "piped"],
+        body.as_bytes(),
+        &[("EDITOR", editor.to_str().unwrap())],
+    );
+    assert!(result.status.success());
+    assert_eq!(
+        fixture.success(&["s", "piped", "-q"], b"").stdout,
+        body.as_bytes()
+    );
+    assert!(!marker.exists());
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_editor_command_preserves_native_paths_for_saved_and_rendered_edits() {

@@ -29,3 +29,5 @@ node_modules/
 # Cloudflare Workers
 .dev.vars
 wrangler.toml.local
+# Python verification helpers
+__pycache__/

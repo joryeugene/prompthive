@@ -23,6 +23,7 @@ if [[ ! -f "$candidate" && -f "$candidate.exe" ]]; then
 fi
 PROMPTHIVE_BIN="$candidate" bash examples/creative_patterns.sh
 bash scripts/test-pipes "$candidate"
+bash scripts/test-interactive "$candidate"
 cargo build --locked --offline --bin ph --no-default-features
 bash scripts/test-pipes "$candidate" --headless
 # Leave the regular development executable in its default feature configuration.

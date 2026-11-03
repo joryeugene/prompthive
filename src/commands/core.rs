@@ -43,6 +43,66 @@ fn select_or_resolve(storage: &Storage, name: Option<&str>) -> Result<String> {
         Err(e) => Err(e),
     }
 }
+/// Only an actual picker journey may ask for missing values. Exact scripts stay strict.
+fn render_use(
+    storage: &Storage,
+    requested: Option<&str>,
+    directives: Option<&str>,
+    input: &str,
+    variables: &crate::template::Variables,
+    destination: impl Fn(&str) -> String,
+    force_picker: bool,
+) -> Result<(String, String)> {
+    let prefix = directives.map(|text| sources(storage, text)).transpose()?;
+    let composer = Composer::new(storage.clone());
+    let render = |name: &str, values: &crate::template::Variables| {
+        match &prefix {
+            Some(names) => composer.render_with_directives(name, names, input, values),
+            None => composer.render(&[name.to_owned()], input, values),
+        }
+        .map_err(|error| fail(2, format!("{error:#}")))
+    };
+    let query = if force_picker {
+        requested.unwrap_or("")
+    } else if let Some(name) = requested {
+        match resolve_prompt_name(storage, name) {
+            Ok(name) => {
+                let text = render(&name, variables)?;
+                return Ok((name, text));
+            }
+            Err(error) if interactive() && super::common::error_code(&error) == 2 => name,
+            Err(error) => return Err(error),
+        }
+    } else {
+        ""
+    };
+    if !interactive() {
+        return Err(fail(2,"search preview needs a capable terminal; use ph f QUERY, then ph u EXACT_NAME (or -q for text)"));
+    }
+    #[cfg(feature = "tui")]
+    {
+        crate::tui::pick_rendered(
+            storage,
+            query,
+            variables,
+            destination,
+            |name, values| {
+                let mut names = prefix.clone().unwrap_or_default();
+                names.push(name.to_owned());
+                composer
+                    .required_variables(&names, values)
+                    .map_err(|error| fail(2, format!("{error:#}")))
+            },
+            render,
+        )?
+        .ok_or_else(|| fail(130, "Cancelled; no prompt was used."))
+    }
+    #[cfg(not(feature = "tui"))]
+    {
+        let _ = (query, destination);
+        unreachable!("interactive() is false without the tui feature")
+    }
+}
 fn sources(storage: &Storage, text: &str) -> Result<Vec<String>> {
     let names = crate::parse_prompt_list(text);
     if names.is_empty() {
@@ -70,22 +130,40 @@ fn terminal_description(text: &str) -> String {
         .collect()
 }
 fn readable_prompts(storage: &Storage) -> Result<Vec<Prompt>> {
-    storage
-        .list_prompts()?
-        .iter()
-        .map(|name| {
-            let (meta, _) = storage.read_prompt(name)?;
-            Ok(Prompt {
-                name: name.clone(),
-                short_code: String::new(),
-                description: meta.description,
-                version: meta.version,
-                created_at: meta.created_at,
-                updated_at: meta.updated_at,
-                git_hash: meta.git_hash,
-            })
-        })
-        .collect()
+    let mut prompts = Vec::new();
+    let mut budget = crate::limits::Budget::new(crate::limits::IMPORT_BYTES, "prompt search index");
+    for name in storage.list_prompts()? {
+        let (meta, _) = storage.read_prompt(&name)?;
+        budget.add(name.len())?;
+        budget.add(meta.description.len())?;
+        budget.add(std::mem::size_of::<Prompt>())?;
+        prompts.push(Prompt {
+            name: name.clone(),
+            short_code: String::new(),
+            description: meta.description,
+            version: meta.version,
+            created_at: meta.created_at,
+            updated_at: meta.updated_at,
+            git_hash: meta.git_hash,
+        });
+    }
+    Ok(prompts)
+}
+fn listing(prompts: &[Prompt], descriptions: bool) -> Result<String> {
+    let mut text = String::new();
+    for prompt in prompts {
+        crate::limits::push_str(&mut text, &prompt.name, "prompt listing")?;
+        if descriptions {
+            crate::limits::push_str(&mut text, "  ", "prompt listing")?;
+            crate::limits::push_str(
+                &mut text,
+                &terminal_description(&prompt.description),
+                "prompt listing",
+            )?;
+        }
+        crate::limits::push_str(&mut text, "\n", "prompt listing")?;
+    }
+    Ok(text)
 }
 pub fn run(command: Option<Commands>) -> Result<()> {
     let start = Instant::now();
@@ -103,10 +181,15 @@ pub fn run(command: Option<Commands>) -> Result<()> {
         }
         let storage = Storage::new()?;
         storage.init()?;
-        let name = select(&storage, "")?;
-        let text = Composer::new(storage.clone())
-            .render(std::slice::from_ref(&name), &input, &Default::default())
-            .map_err(|e| fail(2, format!("{e:#}")))?;
+        let (name, text) = render_use(
+            &storage,
+            None,
+            None,
+            &input,
+            &Default::default(),
+            |name| IoOptions::default().confirmation(name),
+            false,
+        )?;
         return IoOptions::default().emit(&storage, &text, &name, None);
     }
     // Help/completions do not create or inspect a store.
@@ -120,12 +203,7 @@ pub fn run(command: Option<Commands>) -> Result<()> {
             let variables=parse_variables(&vars)?;
             let input=read_input(input.as_deref())?;
             storage.init()?;
-            let name=select_or_resolve(&storage,name.as_deref())?;
-            let composer=Composer::new(storage.clone());
-            let mut text=if let Some(directives)=with_directives {
-                let names=sources(&storage,&directives)?;
-                composer.render_with_directives(&name,&names,&input,&variables)
-            } else {composer.render(std::slice::from_ref(&name),&input,&variables)}.map_err(|e|fail(2,format!("{e:#}")))?;
+            let (name,mut text)=render_use(&storage,name.as_deref(),with_directives.as_deref(),&input,&variables,|name| { let target=io.confirmation(name); if edit { format!("Review in EDITOR, then {target}") } else { target } },false)?;
             if edit {text=crate::edit::edit_content(&text)?;}
             io.emit(&storage,&text,&name,None)
         }
@@ -154,9 +232,15 @@ pub fn run(command: Option<Commands>) -> Result<()> {
                 None=>(name,None),
             };
             Storage::validate_name(&name).map_err(usage)?;
+            let auto_edit=argument.is_none() && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
             let mut text=read_input(argument.as_deref())?;
             if clean {text=crate::clean::clean_text(&text);}
-            if edit {text=crate::edit::edit_content(&text)?;}
+            if edit || auto_edit {
+                io.preflight_new(&storage,&name)?;
+                let initially_empty=text.is_empty() && argument.is_none();
+                text=crate::edit::edit_content(&text)?;
+                if initially_empty && text.is_empty() { return Err(fail(130,"Editor cancelled; no empty note was created. Supply an explicit empty argument to create one.")); }
+            }
             let metadata=PromptMetadata{id:name.clone(),..Default::default()};
             // One explicit destination replaces the default save. A failed
             // export or copy never leaves a surprising extra saved prompt.
@@ -169,22 +253,33 @@ pub fn run(command: Option<Commands>) -> Result<()> {
             }
         }
         Commands::Edit{name}=>{
-            storage.init()?;let name=resolve_prompt_name(&storage,&name)?;
+            let name=if let Some(name)=name { storage.init()?;resolve_prompt_name(&storage,&name)? } else {
+                if !std::io::stdin().is_terminal() || !interactive() { return Err(fail(2,"ph e needs an exact NAME in pipes; run ph e in a terminal to search.")); }
+                storage.init()?;
+                #[cfg(feature="tui")]
+                { crate::tui::pick_prompt_for(&storage,"",crate::tui::PickerIntent::Edit)?.ok_or_else(||fail(130,"Cancelled; no prompt was edited."))? }
+                #[cfg(not(feature="tui"))]
+                { unreachable!("interactive() is false without tui") }
+            };
             crate::edit::edit_prompt(&storage,&name)?;eprintln!("Saved {name}.");Ok(())
         }
         Commands::Ls{clipboard,destination}=>{
             let io=IoOptions::new(destination,clipboard)?;
             let explicit=io.clipboard || io.destination.save.is_some() || io.destination.append.is_some() || io.destination.file.is_some();
             let text=if std::io::stdout().is_terminal() && !explicit && !io.destination.quiet {
-                readable_prompts(&storage)?.iter().map(|p|format!("{}  {}\n",p.name,terminal_description(&p.description))).collect::<String>()
-            } else {storage.list_prompts()?.iter().map(|n|format!("{n}\n")).collect::<String>()};
+                listing(&readable_prompts(&storage)?,true)?
+            } else {
+                let mut text=String::new();
+                for name in storage.list_prompts()? { crate::limits::push_str(&mut text,&name,"prompt listing")?;crate::limits::push_str(&mut text,"\n","prompt listing")?; }
+                text
+            };
             if explicit {io.emit(&storage,&text,"prompts",None)} else {write_stdout(&text)}
         }
         Commands::Find{query,clipboard,destination}=>{
             let io=IoOptions::new(destination,clipboard)?;
             let explicit=io.clipboard || io.destination.save.is_some() || io.destination.append.is_some() || io.destination.file.is_some();
             let prompts=matching::ranked_prompts(&query,&readable_prompts(&storage)?);
-            let text=prompts.iter().map(|p|if std::io::stdout().is_terminal() && !explicit && !io.destination.quiet {format!("{}  {}\n",p.name,terminal_description(&p.description))}else{format!("{}\n",p.name)}).collect::<String>();
+            let text=listing(&prompts,std::io::stdout().is_terminal() && !explicit && !io.destination.quiet)?;
             if explicit {io.emit(&storage,&text,"matches",None)} else {write_stdout(&text)}
         }
         Commands::Rename{old_name,new_name}=>{
@@ -205,8 +300,9 @@ pub fn run(command: Option<Commands>) -> Result<()> {
         Commands::Tui{search}=>{
             let input=read_input(None)?;
             if !interactive(){return Err(fail(2,"terminal preview is unavailable; use ph f QUERY then ph u EXACT_NAME"));}
-            storage.init()?;let name=select(&storage,search.as_deref().unwrap_or(""))?;
-            let text=Composer::new(storage.clone()).render(std::slice::from_ref(&name),&input,&Default::default()).map_err(|e|fail(2,format!("{e:#}")))?;
+            storage.init()?;
+            // t is an explicit discovery request even when SEARCH is an exact name.
+            let (name,text)=render_use(&storage,search.as_deref(),None,&input,&Default::default(),|name|IoOptions::default().confirmation(name),true)?;
             IoOptions::default().emit(&storage,&text,&name,None)
         }
         Commands::Export{path}=>{

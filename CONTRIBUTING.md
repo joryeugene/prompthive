@@ -51,6 +51,8 @@ Automated headless checks do not prove picker readability, keyboard behavior, te
 
 ## Preserve the library
 
+`bash scripts/test-interactive /absolute/path/to/ph` exercises guided fields, exact frozen previews, literal multiline paste, defaults and explicit empty values, resized/tiny terminals, searchable editing, and new-note editor success/cancellation/failure in disposable POSIX PTYs. It saves no variable answers and removes desktop display variables. Use `--report FILE --capture-dir DIR` for the exact executable hash, action trace, terminal observations, and decoded screen text. The default installed-package gate runs this same suite; native Windows terminal behavior requires separate acceptance.
+
 Keep old Markdown bodies and unfamiliar frontmatter readable. Back up a mutation before replacing, deleting, or renaming content; a failed required backup must abort the change. Reject paths or symlinks that escape the selected store. Test interrupted writes, permissions, concurrent edits, malformed files, Unicode, and ambiguous names.
 
 Import and export are local file operations. Default conflicts must preserve existing content, and imported compatibility bindings must never point at different content because a prompt was skipped or renamed. Do not add account requirements, silent network requests, telemetry, automatic backup pruning, or migration that deletes credentials or user data.
