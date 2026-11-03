@@ -3,7 +3,10 @@
 use anyhow::{bail, Context, Result};
 use crossterm::{
     cursor::{Hide, Show},
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -28,8 +31,18 @@ use std::{
 
 use crate::{
     matching::{ranked_prompts, Prompt},
+    template::Variables,
     Storage,
 };
+
+mod guided;
+type Screen = Terminal<CrosstermBackend<Box<dyn Write>>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickerIntent {
+    Use,
+    Edit,
+}
 
 const NAVIGATION: &str = "Type to find  Up/Down select  Enter use  Esc cancel";
 const COMMANDS: &str = "CLI: u use  f find  n new  e edit  c compose";
@@ -70,47 +83,111 @@ fn display_supported(term: Option<&str>, no_color: bool) -> bool {
 /// Return a full canonical ID only after Enter. Escape, Ctrl-C and Unix
 /// termination signals cancel; opening and cancelling have no storage effects.
 pub fn pick_prompt(storage: &Storage, query: &str) -> Result<Option<String>> {
+    pick_prompt_for(storage, query, PickerIntent::Use)
+}
+
+pub fn pick_prompt_for(
+    storage: &Storage,
+    query: &str,
+    intent: PickerIntent,
+) -> Result<Option<String>> {
+    pick_with(storage, query, intent, |name, _, _| {
+        Ok(Some(name.to_owned()))
+    })
+}
+
+/// Selection, missing values, and final preview share one terminal session.
+/// The returned buffer is the exact reviewed output; callers must not render it again.
+pub fn pick_rendered<M, R, D>(
+    storage: &Storage,
+    query: &str,
+    supplied: &Variables,
+    destination: D,
+    missing: M,
+    render: R,
+) -> Result<Option<(String, String)>>
+where
+    M: Fn(&str, &Variables) -> Result<Vec<String>>,
+    R: Fn(&str, &Variables) -> Result<String>,
+    D: Fn(&str) -> String,
+{
+    pick_with(
+        storage,
+        query,
+        PickerIntent::Use,
+        |name, terminal, interrupted| {
+            let required = missing(name, supplied)?;
+            if required.is_empty() {
+                return Ok(Some((name.to_owned(), render(name, supplied)?)));
+            }
+            guided::complete(
+                terminal,
+                interrupted,
+                name,
+                &destination(name),
+                required,
+                supplied,
+                |values| render(name, values),
+            )
+            .map(|output| output.map(|text| (name.to_owned(), text)))
+        },
+    )
+}
+
+fn pick_with<T>(
+    storage: &Storage,
+    query: &str,
+    intent: PickerIntent,
+    selected: impl FnOnce(&str, &mut Screen, &Arc<AtomicBool>) -> Result<Option<T>>,
+) -> Result<Option<T>> {
     if !interactive_supported() {
         bail!("Interactive preview is unavailable here. Use ph f QUERY, then ph u FULL_NAME.");
     }
+    crate::limits::check_text(query, "search query")?;
     let entries = load_entries(storage)?;
     let mut state = PickerState::new(entries, query);
+    state.intent = intent;
     let (writer, restore) = terminal_writers()?;
     let (_session, interrupted) = TerminalSession::enter(restore)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(writer))
         .context("Could not initialize the prompt picker terminal")?;
-
     loop {
         if interrupted.load(Ordering::Relaxed) {
             return Ok(None);
         }
         terminal.draw(|frame| state.draw(frame))?;
-        let ready = match event::poll(Duration::from_millis(100)) {
-            Ok(ready) => ready,
-            Err(_) if interrupted.load(Ordering::Relaxed) => return Ok(None),
-            Err(error) => return Err(error).context("Could not read picker input"),
-        };
-        if !ready {
-            continue;
-        }
-        let input = match event::read() {
-            Ok(input) => input,
-            Err(_) if interrupted.load(Ordering::Relaxed) => return Ok(None),
-            Err(error) => return Err(error).context("Could not read picker input"),
-        };
-        match input {
-            Event::Key(key) => match state.key(key) {
-                Decision::Use(name) => return Ok(Some(name)),
+        match poll_event(&interrupted)? {
+            Some(Event::Key(key)) => match state.key(key) {
+                Decision::Use(name) => return selected(&name, &mut terminal, &interrupted),
                 Decision::Cancel => return Ok(None),
                 Decision::Continue => {}
             },
-            Event::Resize(_, _) => {}
-            Event::Paste(text) => {
+            Some(Event::Paste(text)) => {
+                let total = state.query.len().checked_add(text.len()).ok_or_else(|| {
+                    crate::limits::exceeded("search query", crate::limits::TEXT_BYTES)
+                })?;
+                crate::limits::check_len(total, crate::limits::TEXT_BYTES, "search query")?;
                 state.query.extend(text.chars().filter(|c| !c.is_control()));
                 state.refilter();
             }
             _ => {}
         }
+    }
+}
+
+fn poll_event(interrupted: &Arc<AtomicBool>) -> Result<Option<Event>> {
+    let ready = match event::poll(Duration::from_millis(100)) {
+        Ok(ready) => ready,
+        Err(_) if interrupted.load(Ordering::Relaxed) => return Ok(None),
+        Err(error) => return Err(error).context("Could not read picker input"),
+    };
+    if !ready {
+        return Ok(None);
+    }
+    match event::read() {
+        Ok(input) => Ok(Some(input)),
+        Err(_) if interrupted.load(Ordering::Relaxed) => Ok(None),
+        Err(error) => Err(error).context("Could not read picker input"),
     }
 }
 
@@ -165,8 +242,13 @@ impl TerminalSession {
         session.raw = true;
         enable_raw_mode().context("Could not enable picker keyboard input")?;
         session.alternate = true;
-        execute!(session.restore, EnterAlternateScreen, Hide)
-            .context("Could not open the picker screen")?;
+        execute!(
+            session.restore,
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            Hide
+        )
+        .context("Could not open the picker screen")?;
         Ok((session, interrupted))
     }
 }
@@ -177,7 +259,12 @@ impl Drop for TerminalSession {
             let _ = disable_raw_mode();
         }
         if self.alternate {
-            let _ = execute!(self.restore, Show, LeaveAlternateScreen);
+            let _ = execute!(
+                self.restore,
+                DisableBracketedPaste,
+                Show,
+                LeaveAlternateScreen
+            );
             let _ = self.restore.flush();
         }
         #[cfg(unix)]
@@ -192,43 +279,57 @@ struct Entry {
     prompt: Prompt,
     body: String,
     error: Option<String>,
+    editable: bool,
 }
 
 fn load_entries(storage: &Storage) -> Result<Vec<Entry>> {
-    storage
-        .list_prompts()?
-        .into_iter()
-        .map(|name| {
-            let entry = match storage.read_prompt(&name) {
-                Ok((metadata, body)) => Entry {
-                    prompt: Prompt {
-                        name,
-                        short_code: String::new(),
-                        description: metadata.description,
-                        version: metadata.version,
-                        created_at: metadata.created_at,
-                        updated_at: metadata.updated_at,
-                        git_hash: metadata.git_hash,
-                    },
-                    body,
-                    error: None,
+    load_entries_with_budget(storage, crate::limits::IMPORT_BYTES)
+}
+
+fn load_entries_with_budget(storage: &Storage, limit: usize) -> Result<Vec<Entry>> {
+    let mut budget = crate::limits::Budget::new(limit, "picker library");
+    let mut entries = Vec::new();
+    for name in storage.list_prompts()? {
+        let entry = match storage.read_prompt(&name) {
+            Ok((metadata, body)) => Entry {
+                prompt: Prompt {
+                    name,
+                    short_code: String::new(),
+                    description: metadata.description,
+                    version: metadata.version,
+                    created_at: metadata.created_at,
+                    updated_at: metadata.updated_at,
+                    git_hash: metadata.git_hash,
                 },
-                Err(error) => {
-                    let permissions = error.chain().any(|cause| {
-                        cause
-                            .downcast_ref::<io::Error>()
-                            .is_some_and(|error| error.kind() == io::ErrorKind::PermissionDenied)
-                    });
-                    let problem = if permissions {
-                        "Read permission is denied."
-                    } else {
-                        "The prompt could not be read or its frontmatter is malformed."
-                    };
-                    let location = storage
-                        .prompt_path(&name)
-                        .map(|path| path.display().to_string())
-                        .unwrap_or_else(|_| storage.base_dir().display().to_string());
-                    Entry {
+                body,
+                error: None,
+                editable: true,
+            },
+            Err(error) => {
+                let permissions = error.chain().any(|cause| {
+                    cause
+                        .downcast_ref::<io::Error>()
+                        .is_some_and(|error| error.kind() == io::ErrorKind::PermissionDenied)
+                });
+                let limit = error
+                    .chain()
+                    .find_map(|cause| cause.downcast_ref::<crate::limits::LimitError>());
+                let problem = if permissions {
+                    "Read permission is denied.".to_owned()
+                } else if let Some(limit) = limit {
+                    format!("Preview unavailable: {limit}. The stored file is unchanged.")
+                } else {
+                    "The prompt could not be read or its frontmatter is malformed.".to_owned()
+                };
+                let editable = storage
+                    .read_raw(&name)
+                    .ok()
+                    .is_some_and(|bytes| std::str::from_utf8(&bytes).is_ok());
+                let location = storage
+                    .prompt_path(&name)
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|_| storage.base_dir().display().to_string());
+                Entry {
                         prompt: Prompt {
                             name: name.clone(),
                             short_code: String::new(),
@@ -239,16 +340,22 @@ fn load_entries(storage: &Storage) -> Result<Vec<Entry>> {
                             git_hash: None,
                         },
                         body: String::new(),
-                        error: Some(format!(
+                        editable,
+                    error: Some(format!(
                             "{problem}\nPath: {location}\nCheck its frontmatter and file permissions.\nEdit with: ph e {}",
                             shell_selector(&name)
                         )),
                     }
-                }
-            };
-            Ok(entry)
-        })
-        .collect()
+            }
+        };
+        budget.add(std::mem::size_of::<Entry>())?;
+        budget.add(entry.prompt.name.len())?;
+        budget.add(entry.prompt.description.len())?;
+        budget.add(entry.body.len())?;
+        budget.add(entry.error.as_ref().map_or(0, String::len))?;
+        entries.push(entry);
+    }
+    Ok(entries)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -259,6 +366,7 @@ enum Decision {
 }
 
 struct PickerState {
+    intent: PickerIntent,
     entries: Vec<Entry>,
     filtered: Vec<usize>,
     query: String,
@@ -273,6 +381,7 @@ struct PickerState {
 impl PickerState {
     fn new(entries: Vec<Entry>, query: &str) -> Self {
         let mut state = Self {
+            intent: PickerIntent::Use,
             entries,
             filtered: Vec::new(),
             query: query.chars().filter(|c| !c.is_control()).collect(),
@@ -336,11 +445,16 @@ impl PickerState {
             }
             KeyCode::Enter => {
                 if let Some(entry) = self.selected() {
-                    if entry.error.is_none() {
+                    if entry.error.is_none()
+                        || (self.intent == PickerIntent::Edit && entry.editable)
+                    {
                         return Decision::Use(entry.prompt.name.clone());
                     }
-                    self.message =
-                        Some("Cannot use this prompt. Check the file shown in the preview.".into());
+                    self.message = Some(if self.intent == PickerIntent::Edit {
+                        "Cannot edit this prompt safely. Check its bytes and permissions.".into()
+                    } else {
+                        "Cannot use this prompt. Check the file shown in the preview.".into()
+                    });
                 }
             }
             KeyCode::Up | KeyCode::Down => {
@@ -372,8 +486,14 @@ impl PickerState {
             KeyCode::Char(character)
                 if !key.modifiers.contains(KeyModifiers::CONTROL) && !character.is_control() =>
             {
-                self.query.push(character);
-                self.refilter();
+                if self.query.len().saturating_add(character.len_utf8())
+                    <= crate::limits::TEXT_BYTES
+                {
+                    self.query.push(character);
+                    self.refilter();
+                } else {
+                    self.message = Some("Search query is too large.".into());
+                }
             }
             _ => {}
         }
@@ -400,7 +520,11 @@ impl PickerState {
             Paragraph::new("Prompthive").style(Style::default().add_modifier(Modifier::BOLD)),
             Rect { height: 1, ..area },
         );
-        let prefix = "Find a prompt: ";
+        let prefix = if self.intent == PickerIntent::Edit {
+            "Find to edit: "
+        } else {
+            "Find a prompt: "
+        };
         let query = tail_to_width(
             &safe_text(&self.query),
             area.width.saturating_sub(prefix.len() as u16 + 1),
@@ -434,12 +558,20 @@ impl PickerState {
         };
         frame.render_widget(
             Paragraph::new(Text::from(vec![
-                Line::from(if area.width >= 52 {
+                Line::from(if self.intent == PickerIntent::Edit && area.width < 36 {
+                    "Up/Down Enter edit Esc cancel"
+                } else if self.intent == PickerIntent::Edit {
+                    "Up/Down select  Enter edit  Esc cancel"
+                } else if area.width >= 52 {
                     NAVIGATION
+                } else if area.width < 36 {
+                    "Up/Down  Enter use  Esc cancel"
                 } else {
                     "Up/Down select  Enter use  Esc cancel"
                 }),
-                Line::from(if area.width >= 52 {
+                Line::from(if self.intent == PickerIntent::Edit {
+                    "Enter opens EDITOR; nothing copied"
+                } else if area.width >= 52 {
                     "PgUp/PgDn preview  Default: copy; show if unavailable"
                 } else {
                     "Default: copy/show; PgUp/PgDn preview"
@@ -481,7 +613,11 @@ impl PickerState {
             Some(entry) => entry.clone(),
             None => return,
         };
-        let command = format!("Use again: ph u {}", shell_selector(&selected.prompt.name));
+        let command = if self.intent == PickerIntent::Edit {
+            format!("Edit with: ph e {}", shell_selector(&selected.prompt.name))
+        } else {
+            format!("Use again: ph u {}", shell_selector(&selected.prompt.name))
+        };
         let identity = wrap_text(&safe_text(&command), content.width);
         let identity_height = identity.len();
         if identity_height.saturating_add(4) > content.height as usize {
@@ -664,6 +800,7 @@ mod tests {
             },
             body: body.into(),
             error: None,
+            editable: true,
         }
     }
 
@@ -901,6 +1038,103 @@ mod tests {
         assert!(!display_supported(None, false));
         assert!(!display_supported(Some("xterm-256color"), true));
         assert!(display_supported(Some("xterm-256color"), false));
+    }
+
+    #[test]
+    fn edit_intent_is_visible_and_can_select_a_malformed_note_for_repair() {
+        let mut broken = entry("notes/broken", "");
+        broken.error = Some("Malformed frontmatter; use an editor to repair it.".into());
+        let mut state = PickerState::new(vec![broken], "");
+        state.intent = PickerIntent::Edit;
+        for (width, height) in [(32, 18), (40, 18), (80, 24), (120, 40)] {
+            let screen = painted(&mut state, width, height);
+            assert!(screen.contains("Enter edit"));
+            assert!(screen.contains("Esc cancel"));
+            assert!(screen
+                .lines()
+                .map(str::trim)
+                .collect::<String>()
+                .contains("Edit with: ph e notes/broken"));
+        }
+        assert_eq!(
+            state.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Decision::Use("notes/broken".into())
+        );
+        state.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert_eq!(state.query, "n");
+    }
+
+    #[test]
+    fn edit_repairability_uses_checked_raw_utf8_and_excludes_unreadable_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        let prompts = directory.path().join("prompts");
+        std::fs::create_dir(&prompts).unwrap();
+        std::fs::write(
+            prompts.join("broken.md"),
+            "---\ndescription: [broken\n---\nPrivate raw note",
+        )
+        .unwrap();
+        std::fs::write(prompts.join("binary.md"), [0xff, 0xfe]).unwrap();
+        let storage = Storage::new_with_base(directory.path().to_path_buf()).unwrap();
+        let entries = load_entries(&storage).unwrap();
+        assert!(
+            entries
+                .iter()
+                .find(|e| e.prompt.name == "broken")
+                .unwrap()
+                .editable
+        );
+        assert!(
+            !entries
+                .iter()
+                .find(|e| e.prompt.name == "binary")
+                .unwrap()
+                .editable
+        );
+        let mut state = PickerState::new(entries, "binary");
+        state.intent = PickerIntent::Edit;
+        painted(&mut state, 80, 24);
+        assert_eq!(
+            state.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Decision::Continue
+        );
+        let mut unreadable = entry("unreadable", "");
+        unreadable.error = Some("Read permission denied".into());
+        unreadable.editable = false;
+        let mut state = PickerState::new(vec![unreadable], "");
+        state.intent = PickerIntent::Edit;
+        painted(&mut state, 80, 24);
+        assert_eq!(
+            state.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Decision::Continue
+        );
+    }
+
+    #[test]
+    fn aggregate_library_limit_rejects_without_changing_notes() {
+        let directory = tempfile::tempdir().unwrap();
+        let prompts = directory.path().join("prompts");
+        std::fs::create_dir(&prompts).unwrap();
+        std::fs::write(prompts.join("a.md"), "First note").unwrap();
+        let storage = Storage::new_with_base(directory.path().to_path_buf()).unwrap();
+        let entries = load_entries(&storage).unwrap();
+        let entry = &entries[0];
+        let one = std::mem::size_of::<Entry>()
+            + entry.prompt.name.len()
+            + entry.prompt.description.len()
+            + entry.body.len();
+        assert_eq!(load_entries_with_budget(&storage, one).unwrap().len(), 1);
+        assert!(load_entries_with_budget(&storage, one - 1).is_err());
+        std::fs::write(prompts.join("b.md"), "Second note").unwrap();
+        assert!(load_entries_with_budget(&storage, one).is_err());
+        assert_eq!(
+            std::fs::read_to_string(prompts.join("a.md")).unwrap(),
+            "First note"
+        );
+        assert_eq!(
+            std::fs::read_to_string(prompts.join("b.md")).unwrap(),
+            "Second note"
+        );
     }
 
     #[test]
