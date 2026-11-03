@@ -50,6 +50,21 @@ class TerminalSessionContract(unittest.TestCase):
         self.assertEqual(self.exercise('import sys; sys.stdout.write("x"*1024); sys.stdout.flush()'), (0, True))
         self.assertLess(time.monotonic()-started,8)
 
+    def test_keeper_survives_master_hangup_until_cleanup(self):
+        master,slave=pty.openpty()
+        child=TerminalChild([sys.executable,'-c','pass'],slave=slave,stdin=slave,
+            stdout=slave,stderr=slave,cwd=os.getcwd(),env=os.environ.copy())
+        child.wait(timeout=3)
+        os.close(master);os.close(slave)
+        try:
+            time.sleep(.05)
+            self.assertIsNone(child.supervisor.poll())
+        finally:
+            child.close()
+
+    def test_application_keeps_default_hangup_disposition(self):
+        self.assertEqual(self.exercise('import signal; assert signal.getsignal(signal.SIGHUP)==signal.SIG_DFL'), (0, True))
+
     def test_dirty_modes_are_rejected_after_successful_exit(self):
         self.assertEqual(self.exercise('import tty; tty.setraw(1)'), (0, False))
 

@@ -66,3 +66,5 @@ For a bug report, include the operating system, `ph --version`, an isolated repr
 ## Release preparation
 
 Run `cargo fetch --locked`, then `bash scripts/check` for the portable offline suite. It exercises both feature builds through real Bash pipes. Normal release preparation is `bash scripts/release --check`. It invokes `.workflow/check-release --stage local` before Cargo release work; missing or stale workspace acceptance refuses the operation, then the checked source is packaged, installed, and tested in both feature modes. See [.workflow/README.md](.workflow/README.md) for the private evidence location and the safe CI sentinel. CI also runs `bash scripts/test-installed`. Publishing requires reviewed scope approval and the same gate. No release is published by the check mode.
+
+Native macOS terminal tests cancel bare/default-copy journeys before changing a user clipboard. The fresh GitHub-hosted macOS VM explicitly opts into disposable clipboard acceptance with `PROMPTHIVE_QA_DISPOSABLE_CLIPBOARD=1`; the observer also requires GitHub-hosted runner identity and verifies the copied text with `pbpaste`. This is not physical desktop clipboard coverage.

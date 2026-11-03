@@ -117,7 +117,11 @@ def supervise():
     status, release, slave = map(int, sys.argv[1:4])
     os.setsid()
     fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+    signal.signal(signal.SIGHUP, signal.SIG_DFL)
     child = subprocess.Popen(sys.argv[4:])
+    # The application keeps its inherited disposition. Only its keeper must
+    # survive the observer closing the master until explicit group cleanup.
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
     with os.fdopen(status, 'w') as stream:
         stream.write(json.dumps({'pid': child.pid}) + '\n')
         stream.flush()

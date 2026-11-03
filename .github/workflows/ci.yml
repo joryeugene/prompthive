@@ -23,6 +23,9 @@ jobs:
         # GitHub's ARM macOS pool can fail before assigning a runner. Keep the
         # same complete macOS suite on the supported stable Intel image.
         os: [ubuntu-latest, macos-26-intel, windows-latest]
+    env:
+      # Clipboard state belongs to this fresh hosted VM, never a user's desktop.
+      PROMPTHIVE_QA_DISPOSABLE_CLIPBOARD: ${{ matrix.os == 'macos-26-intel' && '1' || '' }}
     defaults:
       run:
         shell: bash

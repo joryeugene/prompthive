@@ -12,6 +12,9 @@ P.add_argument('--capture-dir', type=pathlib.Path)
 P.add_argument('--case', action='append', default=[])
 A = P.parse_args()
 BINARY = A.binary.resolve(strict=True)
+NATIVE_MAC=sys.platform=='darwin'
+DISPOSABLE_CLIPBOARD=(NATIVE_MAC and os.environ.get('PROMPTHIVE_QA_DISPOSABLE_CLIPBOARD')=='1'
+    and os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('RUNNER_ENVIRONMENT')=='github-hosted')
 
 def hashes(store):
     return {str(p.relative_to(store)):hashlib.sha256(p.read_bytes()).hexdigest()
@@ -63,8 +66,9 @@ def case(name):
         if name=='render_failure':query='env_fail';expected_code=2
         if name=='long_identity':query='longform'
         terminal_payload=name in ['bare_guided','t_guided']
-        if name=='bare_guided':args=[]
-        if name=='t_guided':args=['t','exp'];query=''
+        if name in ['bare_guided','bare_preview_cancel']:args=[]
+        if name in ['t_guided','t_preview_cancel']:args=['t','exp'];query=''
+        if name in ['bare_preview_cancel','t_preview_cancel']:expected_code=130
         if name=='unknown_picker':args=['u','exp','-f','result.txt'];query=''
         if name=='with_directives':args=['u','--with','directive','-f','result.txt'];expected=b'RULE [safe]\n\nG [Rust]|[brief]|[]'
         piped=name=='piped_context'
@@ -110,7 +114,7 @@ def case(name):
                         if name!='render_failure':wait('Preview rendered prompt');capture('rendered')
                         if name=='long_identity':assert long_name in screen.text().replace('\n','').replace(' ','')
                         if name=='render_failure':pass
-                        elif name=='cancel_preview':key(b'\x1b')
+                        elif name in ['cancel_preview','bare_preview_cancel','t_preview_cancel']:key(b'\x1b')
                         elif name=='resize':
                             screen.resize(40,18);fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',18,40,0,0));child.send_signal(signal.SIGWINCH);wait('Preview rendered prompt');capture('resized');key(b'\r')
                         elif name=='tiny_blocked':
@@ -135,6 +139,9 @@ def case(name):
                 if terminal_payload:
                     assert b'\x1b[?1049l' in raw,'alternate screen was not restored'
                     actual=bytes(raw).rsplit(b'\x1b[?1049l',1)[1]
+                    if DISPOSABLE_CLIPBOARD and not actual:
+                        actual=subprocess.check_output(['/usr/bin/pbpaste'],env=env,timeout=3)
+                        assert b'Copied ' in (root/'stderr').read_bytes()
                 else:
                     output=root/('explain.md' if name=='derived_destination' else 'result.txt');actual=output.read_bytes()
                 if name=='frozen_context':
@@ -150,6 +157,7 @@ def case(name):
             stderr.close();os.close(master);os.close(slave)
             child.close()
         result={'case':name,'argv':args,'passed':failure is None,'error':failure,'exit':child.returncode,'events_hex':events,
+                'completion_exercised':name not in ['bare_preview_cancel','t_preview_cancel'],
                 'injected_bytes':sum(len(bytes.fromhex(v)) for v in events),'frames':frames,'terminal_restored':after_modes==before_modes,
                 'observed_payload_hex':None if actual is None else actual.hex(),'stderr':(root/'stderr').read_text(encoding='utf-8',errors='replace')}
         if A.capture_dir:
@@ -161,11 +169,15 @@ names=A.case or ['guided_two','guided_narrow','guided_wide','long_identity','def
     'bare_guided','t_guided','unknown_picker','with_directives',
     'derived_destination','supplied_fast','one_supplied','default_fast','direct_missing','render_failure','plain_fast','cancel_fields','cancel_preview','ctrl_c','sigterm','resize','tiny_blocked',
     'edit_search','edit_repair','new_editor','new_empty','new_failure','new_cancel']
+exceptions=[]
+if NATIVE_MAC and not DISPOSABLE_CLIPBOARD:
+    names=[{'bare_guided':'bare_preview_cancel','t_guided':'t_preview_cancel'}.get(n,n) for n in names]
+    exceptions.append('Native Mac default-destination acceptance is preview/cancel only on a user desktop; no clipboard is read or changed. Complete copy/paste acceptance requires explicit disposable hosted-runner opt-in.')
 results=[]
 for name in names:
     row=case(name);results.append(row)
     print(('PASS' if row['passed'] else 'FAIL')+': '+row['case']+(' '+str(row['error']) if row['error'] else ''),flush=True)
 report={'binary':str(BINARY),'binary_sha256':hashlib.sha256(BINARY.read_bytes()).hexdigest(),'passed':all(c['passed'] for c in results),
-    'cases':results,'limits':'POSIX PTYs and synthetic stores/EDITOR only; no physical desktop clipboard or human acceptance claim.'}
+    'cases':results,'exceptions':exceptions,'disposable_native_clipboard':DISPOSABLE_CLIPBOARD,'limits':'POSIX PTYs and synthetic stores/EDITOR only; no physical desktop clipboard or human acceptance claim.'}
 if A.report:A.report.parent.mkdir(parents=True,exist_ok=True);A.report.write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')
 raise SystemExit(0 if report['passed'] else 1)
