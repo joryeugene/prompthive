@@ -2,7 +2,6 @@
 
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 
 use crate::storage::{PromptMetadata, Storage};
 use crate::template::{validate_declarations, PreparedTemplate, RenderContext, Variables};
@@ -15,6 +14,7 @@ struct Source {
     name: String,
     metadata: PromptMetadata,
     body: String,
+    bytes: usize,
 }
 
 /// Paths are explicit; a dotted prompt ID is still a prompt ID.
@@ -36,14 +36,12 @@ impl Composer {
         if names.is_empty() {
             bail!("no prompts specified for composition");
         }
-        let sources = names
-            .iter()
-            .map(|name| self.load_source(name))
-            .collect::<Result<Vec<_>>>()?;
+        crate::limits::check_text(input, "composition input")?;
+        let sources = self.load_sources(names)?;
         let prepared = self.prepare(&sources, supplied)?;
         let mut result = input.to_string();
         for template in prepared {
-            result = template.render(&result);
+            result = template.render(&result)?;
         }
         Ok(result)
     }
@@ -56,17 +54,16 @@ impl Composer {
         input: &str,
         supplied: &Variables,
     ) -> Result<String> {
-        let mut sources = directives
-            .iter()
-            .map(|name| self.load_source(name))
-            .collect::<Result<Vec<_>>>()?;
-        sources.push(self.load_source(name)?);
+        crate::limits::check_text(input, "composition input")?;
+        let mut names = directives.to_vec();
+        names.push(name.to_owned());
+        let sources = self.load_sources(&names)?;
         let mut prepared = self.prepare(&sources, supplied)?;
         let mut combined = prepared.pop().expect("target source always present");
         for directive in prepared.into_iter().rev() {
-            combined.prepend(directive);
+            combined.prepend(directive)?;
         }
-        Ok(combined.render(input))
+        combined.render(input)
     }
 
     /// Kept for programmatic callers; stdin and destinations belong to the CLI.
@@ -78,27 +75,62 @@ impl Composer {
         self.compose_pipe(names, "")
     }
 
+    /// Collect only absent required values; no context is captured or text rendered here.
+    pub fn required_variables(
+        &self,
+        names: &[String],
+        supplied: &Variables,
+    ) -> Result<Vec<String>> {
+        if names.is_empty() {
+            bail!("no prompts specified for composition");
+        }
+        let sources = self.load_sources(names)?;
+        self.validate_supplied(&sources, supplied)?;
+        Ok(sources
+            .iter()
+            .flat_map(|source| source.metadata.vars.iter())
+            .filter(|(name, default)| default.is_none() && !supplied.contains_key(*name))
+            .map(|(name, _)| name.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect())
+    }
+
+    fn load_sources(&self, names: &[String]) -> Result<Vec<Source>> {
+        let mut budget =
+            crate::limits::Budget::new(crate::limits::IMPORT_BYTES, "composition source batch");
+        let mut sources = Vec::new();
+        for name in names {
+            let source = self.load_source(name)?;
+            budget.add(source.bytes)?;
+            sources.push(source);
+        }
+        Ok(sources)
+    }
+
     fn load_source(&self, name: &str) -> Result<Source> {
-        let (metadata, body) = if is_explicit_file(name) {
+        let bytes = if is_explicit_file(name) {
             let expanded = shellexpand::tilde(name);
-            let content = fs::read_to_string(expanded.as_ref())
-                .with_context(|| format!("cannot read local template source {name:?}"))?;
-            self.storage
-                .parse_prompt_content(&content)
-                .with_context(|| format!("invalid local template source {name:?}"))?
+            crate::limits::read_file(expanded.as_ref(), "local template source")?
         } else {
             self.storage
-                .read_prompt(name)
+                .read_raw(name)
                 .with_context(|| format!("cannot read prompt {name:?}"))?
         };
+        let content = std::str::from_utf8(&bytes).context("template source is not UTF-8")?;
+        let (metadata, body) = self
+            .storage
+            .parse_prompt_content(content)
+            .with_context(|| format!("invalid template source {name:?}"))?;
         Ok(Source {
             name: name.to_string(),
             metadata,
             body,
+            bytes: bytes.len(),
         })
     }
 
-    fn prepare(&self, sources: &[Source], supplied: &Variables) -> Result<Vec<PreparedTemplate>> {
+    fn validate_supplied(&self, sources: &[Source], supplied: &Variables) -> Result<()> {
         let mut declared = BTreeSet::new();
         for source in sources {
             validate_declarations(&source.metadata.vars)
@@ -110,19 +142,27 @@ impl Composer {
                 bail!("variable {name:?} is not declared by any selected template");
             }
         }
+        Ok(())
+    }
+
+    fn prepare(&self, sources: &[Source], supplied: &Variables) -> Result<Vec<PreparedTemplate>> {
+        self.validate_supplied(sources, supplied)?;
         let mut context = RenderContext::capture();
-        sources
-            .iter()
-            .map(|source| {
-                PreparedTemplate::compile(
-                    &source.body,
-                    &source.metadata.vars,
-                    supplied,
-                    &mut context,
-                )
-                .with_context(|| format!("cannot render {:?}", source.name))
-            })
-            .collect()
+        let mut budget =
+            crate::limits::Budget::new(crate::limits::IMPORT_BYTES, "compiled composition");
+        let mut prepared = Vec::new();
+        for source in sources {
+            let template = PreparedTemplate::compile(
+                &source.body,
+                &source.metadata.vars,
+                supplied,
+                &mut context,
+            )
+            .with_context(|| format!("cannot render {:?}", source.name))?;
+            budget.add(template.compiled_bytes()?)?;
+            prepared.push(template);
+        }
+        Ok(prepared)
     }
 }
 
@@ -141,6 +181,7 @@ pub fn parse_prompt_list(input: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::template::Declarations;
+    use std::fs;
     use tempfile::TempDir;
 
     fn store() -> (TempDir, Storage) {
@@ -158,6 +199,46 @@ mod tests {
             ..Default::default()
         };
         storage.write_prompt(name, &metadata, body).unwrap();
+    }
+
+    #[test]
+    fn missing_values_are_sorted_stage_local_and_do_not_capture_context() {
+        let (_directory, storage) = store();
+        save(
+            &storage,
+            "a",
+            "{tone} {env:PROMPTHIVE_REQUIRED_PROBE_UNSET}",
+            BTreeMap::from([("tone".into(), None), ("lang".into(), Some("Rust".into()))]),
+        );
+        save(
+            &storage,
+            "b",
+            "{level} {tone}",
+            BTreeMap::from([
+                ("tone".into(), Some("brief".into())),
+                ("level".into(), None),
+            ]),
+        );
+        let composer = Composer::new(storage);
+        let names = vec!["a".into(), "b".into()];
+        assert_eq!(
+            composer
+                .required_variables(&names, &Variables::new())
+                .unwrap(),
+            vec!["level", "tone"]
+        );
+        assert_eq!(
+            composer
+                .required_variables(&names, &BTreeMap::from([("tone".into(), "".into())]))
+                .unwrap(),
+            vec!["level"]
+        );
+        assert!(composer
+            .required_variables(
+                &names,
+                &BTreeMap::from([("unknown".into(), "value".into())])
+            )
+            .is_err());
     }
 
     #[test]

@@ -13,13 +13,14 @@ pub(crate) const TEMPLATE_PARTS: usize = 65_536;
 pub struct LimitError {
     label: String,
     limit: usize,
+    unit: &'static str,
 }
 impl fmt::Display for LimitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} exceeds the {}-byte safety limit; use smaller input (nothing was truncated)",
-            self.label, self.limit
+            "{} exceeds the {}-{} safety limit; use smaller input (nothing was truncated)",
+            self.label, self.limit, self.unit
         )
     }
 }
@@ -29,8 +30,20 @@ pub fn exceeded(label: &str, limit: usize) -> anyhow::Error {
     LimitError {
         label: label.into(),
         limit,
+        unit: "byte",
     }
     .into()
+}
+pub(crate) fn check_parts(count: usize) -> Result<()> {
+    if count > TEMPLATE_PARTS {
+        return Err(LimitError {
+            label: "compiled template".into(),
+            limit: TEMPLATE_PARTS,
+            unit: "segment",
+        }
+        .into());
+    }
+    Ok(())
 }
 pub fn check_len(length: usize, limit: usize, label: &str) -> Result<()> {
     if length > limit {
@@ -50,16 +63,31 @@ pub fn read(reader: impl Read, limit: usize, label: &str) -> Result<Vec<u8>> {
     let mut chunk = [0u8; 8192];
     while bytes.len() < limit {
         let available = chunk.len().min(limit - bytes.len());
-        let count = reader.read(&mut chunk[..available])?;
+        let count = match reader.read(&mut chunk[..available]) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => result?,
+        };
         if count == 0 {
             return Ok(bytes);
         }
+        let capacity = bytes
+            .capacity()
+            .saturating_mul(2)
+            .max(8192)
+            .max(bytes.len() + count)
+            .min(limit);
         bytes
-            .try_reserve_exact(count)
+            .try_reserve_exact(capacity - bytes.len())
             .context("cannot allocate bounded input buffer")?;
         bytes.extend_from_slice(&chunk[..count]);
     }
-    if reader.read(&mut chunk[..1])? != 0 {
+    let extra = loop {
+        match reader.read(&mut chunk[..1]) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => break result?,
+        }
+    };
+    if extra != 0 {
         return Err(exceeded(label, limit));
     }
     Ok(bytes)
@@ -92,8 +120,13 @@ pub fn push_str(target: &mut String, text: &str, label: &str) -> Result<()> {
         .checked_add(text.len())
         .ok_or_else(|| exceeded(label, TEXT_BYTES))?;
     check_len(size, TEXT_BYTES, label)?;
+    let capacity = target
+        .capacity()
+        .saturating_mul(2)
+        .max(size)
+        .min(TEXT_BYTES);
     target
-        .try_reserve(text.len())
+        .try_reserve_exact(capacity - target.len())
         .context("cannot allocate bounded output buffer")?;
     target.push_str(text);
     Ok(())
@@ -103,6 +136,62 @@ pub struct Budget {
     used: usize,
     limit: usize,
     label: &'static str,
+}
+
+/// Serialize into a bounded buffer rather than allocating an unchecked YAML/JSON string.
+pub(crate) struct Writer {
+    bytes: Vec<u8>,
+    limit: usize,
+    label: &'static str,
+    exceeded: bool,
+}
+impl Writer {
+    pub(crate) fn new(limit: usize, label: &'static str) -> Self {
+        Self {
+            bytes: Vec::new(),
+            limit,
+            label,
+            exceeded: false,
+        }
+    }
+    pub(crate) fn finish<E: Into<anyhow::Error>>(
+        self,
+        result: std::result::Result<(), E>,
+    ) -> Result<Vec<u8>> {
+        if self.exceeded {
+            return Err(exceeded(self.label, self.limit));
+        }
+        result.map_err(Into::into)?;
+        Ok(self.bytes)
+    }
+}
+impl std::io::Write for Writer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self
+            .bytes
+            .len()
+            .checked_add(bytes.len())
+            .is_none_or(|size| size > self.limit)
+        {
+            self.exceeded = true;
+            return Err(std::io::Error::other("serialization exceeds safety limit"));
+        }
+        let capacity = self
+            .bytes
+            .capacity()
+            .saturating_mul(2)
+            .max(8192)
+            .max(self.bytes.len() + bytes.len())
+            .min(self.limit);
+        self.bytes
+            .try_reserve_exact(capacity - self.bytes.len())
+            .map_err(std::io::Error::other)?;
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 impl Budget {
     pub fn new(limit: usize, label: &'static str) -> Self {

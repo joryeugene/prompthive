@@ -166,10 +166,12 @@ pub fn export_store(storage: &Storage, destination: &Path) -> Result<usize> {
             destination.display()
         );
     }
+    let mut budget = crate::limits::Budget::new(crate::limits::IMPORT_BYTES, "export batch");
     let mut payloads = Vec::new();
     let mut entries = Vec::new();
     for id in storage.list_prompts()? {
         let bytes = storage.read_raw(&id)?;
+        budget.add(bytes.len())?;
         let relative = relative_prompt_path(storage, &id)?;
         entries.push(ExportPrompt {
             id,
@@ -193,7 +195,9 @@ pub fn export_store(storage: &Storage, destination: &Path) -> Result<usize> {
         prompts: entries,
         compatibility,
     };
-    let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
+    let mut writer = crate::limits::Writer::new(crate::limits::TEXT_BYTES, "export manifest");
+    let result = serde_json::to_writer_pretty(&mut writer, &manifest);
+    let manifest_bytes = writer.finish(result)?;
     // Reserve the new directory atomically: never replace even an empty existing directory.
     let parent = destination
         .parent()

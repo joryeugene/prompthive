@@ -97,11 +97,13 @@ impl Importer {
             BTreeMap::new()
         };
         let mut entries = Vec::new();
+        let mut budget = crate::limits::Budget::new(crate::limits::IMPORT_BYTES, "import batch");
         let mut recovery_sources = Vec::new();
         if let Some(manifest) = &manifest {
             for prompt in &manifest.prompts {
                 let source = portability::checked_source_path(path, Path::new(&prompt.path))?;
                 let bytes = portability::read_source_bytes(path, Path::new(&prompt.path))?;
+                budget.add(bytes.len())?;
                 if portability::digest(&bytes) != prompt.sha256.to_lowercase() {
                     bail!(
                         "checksum mismatch for '{}' in export; no import was started",
@@ -124,13 +126,15 @@ impl Importer {
                 .filter(|p| !p.as_os_str().is_empty())
                 .unwrap_or(Path::new("."));
             let file = path.file_name().context("import source has no filename")?;
+            let bytes = portability::read_source_bytes(parent, Path::new(file))?;
+            budget.add(bytes.len())?;
             entries.push(ImportEntry {
                 id,
                 source: path.to_path_buf(),
-                bytes: portability::read_source_bytes(parent, Path::new(file))?,
+                bytes,
             });
         } else if info.is_dir() {
-            self.collect_directory(path, name, &mut entries, &mut recovery_sources)?;
+            self.collect_directory(path, name, &mut entries, &mut recovery_sources, &mut budget)?;
         } else {
             bail!("import source is not a regular file or directory");
         }
@@ -260,6 +264,7 @@ impl Importer {
         name: Option<&str>,
         entries: &mut Vec<ImportEntry>,
         recovery_sources: &mut Vec<String>,
+        budget: &mut crate::limits::Budget,
     ) -> Result<()> {
         let legacy = is_legacy_store(root);
         let bank = root.join("bank.yaml").is_file()
@@ -349,11 +354,9 @@ impl Importer {
                 }
             };
             let source = portability::checked_source_path(root, relative)?;
-            entries.push(ImportEntry {
-                id,
-                bytes: portability::read_source_bytes(root, relative)?,
-                source,
-            });
+            let bytes = portability::read_source_bytes(root, relative)?;
+            budget.add(bytes.len())?;
+            entries.push(ImportEntry { id, bytes, source });
         }
         Ok(())
     }

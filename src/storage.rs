@@ -316,6 +316,7 @@ impl Storage {
     }
 
     pub fn parse_prompt_content(&self, content: &str) -> Result<(PromptMetadata, String)> {
+        crate::limits::check_text(content, "prompt text")?;
         let Some(first_end) = content.find('\n') else {
             return Ok((PromptMetadata::default(), content.to_string()));
         };
@@ -330,6 +331,11 @@ impl Storage {
                 .unwrap_or(content.len());
             if content[position..end].trim_end_matches('\r') == "---" {
                 let yaml = &content[first_end + 1..position];
+                crate::limits::check_len(
+                    yaml.len(),
+                    crate::limits::FRONTMATTER_BYTES,
+                    "YAML frontmatter",
+                )?;
                 let value: serde_yaml::Value =
                     serde_yaml::from_str(yaml).context("invalid YAML frontmatter")?;
                 if !value.is_mapping() {
@@ -390,6 +396,11 @@ impl Storage {
                 }
                 return Ok((metadata, content[start..].to_string()));
             }
+            crate::limits::check_len(
+                end - (first_end + 1),
+                crate::limits::FRONTMATTER_BYTES,
+                "YAML frontmatter",
+            )?;
             if end == content.len() {
                 break;
             }
@@ -399,8 +410,17 @@ impl Storage {
     }
 
     pub fn serialize_prompt(metadata: &PromptMetadata, body: &str) -> Result<Vec<u8>> {
+        crate::limits::check_text(body, "prompt body")?;
         crate::template::validate_declarations(&metadata.vars)?;
-        Ok(format!("---\n{}---\n\n{}", serde_yaml::to_string(metadata)?, body).into_bytes())
+        let mut writer =
+            crate::limits::Writer::new(crate::limits::FRONTMATTER_BYTES, "YAML frontmatter");
+        let result = serde_yaml::to_writer(&mut writer, metadata);
+        let yaml = writer.finish(result)?;
+        let mut text = String::new();
+        for part in ["---\n", std::str::from_utf8(&yaml)?, "---\n\n", body] {
+            crate::limits::push_str(&mut text, part, "serialized prompt")?;
+        }
+        Ok(text.into_bytes())
     }
 
     fn validate_raw(&self, bytes: &[u8]) -> Result<()> {

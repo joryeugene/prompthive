@@ -5,7 +5,7 @@ use anyhow::anyhow;
 use anyhow::{bail, Context, Result};
 use std::fmt;
 use std::fs::{self, File, Metadata};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug)]
@@ -327,11 +327,13 @@ impl Directory {
     }
 
     pub(crate) fn read(&self, name: &std::ffi::OsStr) -> Result<(Vec<u8>, Metadata)> {
-        let mut file = self.open_file(name)?;
+        let file = self.open_file(name)?;
         let meta = file.metadata()?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
-            .with_context(|| format!("cannot read {}", self.path.join(name).display()))?;
+        let label = format!("file {}", self.path.join(name).display());
+        if meta.len() > crate::limits::TEXT_BYTES as u64 {
+            return Err(crate::limits::exceeded(&label, crate::limits::TEXT_BYTES));
+        }
+        let bytes = crate::limits::read(file, crate::limits::TEXT_BYTES, &label)?;
         Ok((bytes, meta))
     }
 
