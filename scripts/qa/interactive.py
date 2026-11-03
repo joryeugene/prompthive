@@ -15,6 +15,8 @@ BINARY = A.binary.resolve(strict=True)
 NATIVE_MAC=sys.platform=='darwin'
 DISPOSABLE_CLIPBOARD=(NATIVE_MAC and os.environ.get('PROMPTHIVE_QA_DISPOSABLE_CLIPBOARD')=='1'
     and os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('RUNNER_ENVIRONMENT')=='github-hosted')
+if NATIVE_MAC and os.environ.get('PROMPTHIVE_QA_DISPOSABLE_CLIPBOARD')=='1' and not DISPOSABLE_CLIPBOARD:
+    P.error('Disposable clipboard opt-in requires a fresh GitHub-hosted runner.')
 
 def hashes(store):
     return {str(p.relative_to(store)):hashlib.sha256(p.read_bytes()).hexdigest()
@@ -173,6 +175,7 @@ exceptions=[]
 if NATIVE_MAC and not DISPOSABLE_CLIPBOARD:
     names=[{'bare_guided':'bare_preview_cancel','t_guided':'t_preview_cancel'}.get(n,n) for n in names]
     exceptions.append('Native Mac default-destination acceptance is preview/cancel only on a user desktop; no clipboard is read or changed. Complete copy/paste acceptance requires explicit disposable hosted-runner opt-in.')
+for exception in exceptions:print('EXCEPTION: '+exception,flush=True)
 results=[]
 for name in names:
     row=case(name);results.append(row)
