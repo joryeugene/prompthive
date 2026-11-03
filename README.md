@@ -1,8 +1,12 @@
+<img align="right" src="docs/assets/byt.png" alt="Byt, Prompthive’s terminal buddy" width="128" />
+
 # Prompthive
 
 A local-first prompt toolkit for your terminal. Find, compose, and reuse prompts with fewer keystrokes.
 
 `ph` keeps your prompts and notes in Markdown files. Find one, add context, and copy it or pipe the text to another tool. Prompthive does not run models or require an account.
+
+Meet **Byt** (pronounced *byte*).
 
 ## Install this candidate
 
@@ -40,7 +44,7 @@ printf '%s\n' 'Notes from the design meeting' | ph n notes/meeting
 ph e notes/meeting
 ```
 
-Names are case-sensitive. `work/review` and `personal/review` are different prompts. Use exact, complete names in scripts. A prefix or fuzzy query requires a visible preview and confirmation; in a pipe it fails with candidate names on stderr. Adding another prompt never silently changes the meaning of an exact name. Retained short codes require a verified compatibility map; they are optional, and a real canonical name always wins.
+Names are case-sensitive. A case-insensitive filesystem cannot store case-only variants side by side; Prompthive rejects a differently cased selector and refuses to overwrite the existing file. `work/review` and `personal/review` are different prompts. Use exact, complete names in scripts. A prefix or fuzzy query requires a visible preview and confirmation; in a pipe it fails with candidate names on stderr. Adding another prompt never silently changes the meaning of an exact name. Retained short codes require a verified compatibility map; they are optional, and a real canonical name always wins.
 
 Other actions are `s`/`show`, `l`/`ls`, `r`/`rename`, `d`/`delete`, `t`/`tui`, and `x`/`clean`. Run `ph --help` or `ph ACTION --help` for options. The action `s` shows original text; the flag `-s NAME` saves output:
 
