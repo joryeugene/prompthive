@@ -171,18 +171,21 @@ impl Importer {
                 .extend(crate::matching::legacy_code_report(&old)?);
         }
         let mut available_targets = BTreeMap::new();
+        let mut planned_targets = BTreeMap::new();
         for entry in entries {
             let original_name = entry.id.clone();
             let outcome = (|| -> Result<()> {
                 let target = self.storage.prompt_path(&entry.id)?;
-                let existing = if target.try_exists()? {
+                let existing = if let Some(bytes) = planned_targets.get(&entry.id) {
+                    Some(Vec::clone(bytes))
+                } else if target.try_exists()? {
                     Some(self.storage.read_raw(&entry.id)?)
                 } else {
                     None
                 };
                 let has_history = !self.storage.snapshot_paths(&entry.id)?.is_empty();
                 let id = if version && (existing.is_some() || has_history) {
-                    self.next_version_name(&entry.id)?
+                    self.next_version_name(&entry.id, &planned_targets)?
                 } else {
                     entry.id.clone()
                 };
@@ -224,6 +227,7 @@ impl Importer {
                     }
                 }
                 if dry_run {
+                    planned_targets.insert(id.clone(), entry.bytes.clone());
                     result.planned.push(id.clone());
                     if !renamed {
                         available_targets.insert(original_name.clone(), entry.bytes.clone());
@@ -354,10 +358,11 @@ impl Importer {
         Ok(())
     }
 
-    fn next_version_name(&self, id: &str) -> Result<String> {
+    fn next_version_name(&self, id: &str, planned: &BTreeMap<String, Vec<u8>>) -> Result<String> {
         for number in 2..=10000 {
             let candidate = format!("{id}-v{number}");
-            if !self.storage.prompt_path(&candidate)?.try_exists()?
+            if !planned.contains_key(&candidate)
+                && !self.storage.prompt_path(&candidate)?.try_exists()?
                 && self.storage.snapshot_paths(&candidate)?.is_empty()
             {
                 return Ok(candidate);
@@ -616,6 +621,55 @@ mod tests {
         let storage = Storage::new_with_base(temp.path().join(name)).unwrap();
         storage.init().unwrap();
         storage
+    }
+
+    #[test]
+    fn versioned_dry_run_reserves_destinations_and_matches_real_bindings() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir_all(source.join("prompts")).unwrap();
+        fs::write(source.join("prompts/a.md"), "First source").unwrap();
+        fs::write(source.join("prompts/a-v2.md"), "Second source").unwrap();
+        fs::write(
+            source.join("compatibility.toml"),
+            "version=1\nverified=true\n[bindings]\nv=\"a-v2\"\n",
+        )
+        .unwrap();
+        let destination = storage(&temp, "destination");
+        destination
+            .write_raw("a", b"Existing target", false)
+            .unwrap();
+        let importer = Importer::new(destination.clone());
+        let plan = importer
+            .import_with_options(
+                source.to_str().unwrap(),
+                None,
+                false,
+                true,
+                false,
+                false,
+                true,
+            )
+            .unwrap();
+        assert_eq!(plan.planned, vec!["a-v2", "a-v2-v2"]);
+        assert!(plan.compatibility_planned.is_empty());
+        assert!(!destination.prompt_path("a-v2").unwrap().exists());
+        let actual = importer
+            .import_with_options(
+                source.to_str().unwrap(),
+                None,
+                false,
+                true,
+                false,
+                false,
+                false,
+            )
+            .unwrap();
+        assert_eq!(actual.imported, plan.planned);
+        assert_eq!(actual.compatibility_imported, plan.compatibility_planned);
+        assert_eq!(destination.read_raw("a").unwrap(), b"Existing target");
+        assert_eq!(destination.read_raw("a-v2").unwrap(), b"First source");
+        assert_eq!(destination.read_raw("a-v2-v2").unwrap(), b"Second source");
     }
 
     #[test]
