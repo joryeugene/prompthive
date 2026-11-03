@@ -173,6 +173,12 @@ pub fn export_store(storage: &Storage, destination: &Path) -> Result<usize> {
         let bytes = storage.read_raw(&id)?;
         budget.add(bytes.len())?;
         let relative = relative_prompt_path(storage, &id)?;
+        budget.add(id.len())?;
+        budget.add(relative.as_os_str().as_encoded_bytes().len())?;
+        budget.add(
+            64 + 2
+                * (std::mem::size_of::<ExportPrompt>() + std::mem::size_of::<(PathBuf, Vec<u8>)>()),
+        )?;
         entries.push(ExportPrompt {
             id,
             path: relative.to_string_lossy().replace('\\', "/"),

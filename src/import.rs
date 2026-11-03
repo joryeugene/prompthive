@@ -23,6 +23,19 @@ struct ImportEntry {
     bytes: Vec<u8>,
 }
 
+fn add_entry_budget(
+    budget: &mut crate::limits::Budget,
+    id: &str,
+    source: &Path,
+    bytes: usize,
+) -> Result<()> {
+    budget.add(bytes)?;
+    budget.add(id.len())?;
+    budget.add(source.as_os_str().as_encoded_bytes().len())?;
+    // Include vector slack and owned-name/path bookkeeping, even for empty files.
+    budget.add(2 * std::mem::size_of::<ImportEntry>())
+}
+
 impl Importer {
     pub fn new(storage: Storage) -> Self {
         Self { storage }
@@ -103,7 +116,7 @@ impl Importer {
             for prompt in &manifest.prompts {
                 let source = portability::checked_source_path(path, Path::new(&prompt.path))?;
                 let bytes = portability::read_source_bytes(path, Path::new(&prompt.path))?;
-                budget.add(bytes.len())?;
+                add_entry_budget(&mut budget, &prompt.id, &source, bytes.len())?;
                 if portability::digest(&bytes) != prompt.sha256.to_lowercase() {
                     bail!(
                         "checksum mismatch for '{}' in export; no import was started",
@@ -127,7 +140,7 @@ impl Importer {
                 .unwrap_or(Path::new("."));
             let file = path.file_name().context("import source has no filename")?;
             let bytes = portability::read_source_bytes(parent, Path::new(file))?;
-            budget.add(bytes.len())?;
+            add_entry_budget(&mut budget, &id, path, bytes.len())?;
             entries.push(ImportEntry {
                 id,
                 source: path.to_path_buf(),
@@ -355,7 +368,7 @@ impl Importer {
             };
             let source = portability::checked_source_path(root, relative)?;
             let bytes = portability::read_source_bytes(root, relative)?;
-            budget.add(bytes.len())?;
+            add_entry_budget(budget, &id, &source, bytes.len())?;
             entries.push(ImportEntry { id, bytes, source });
         }
         Ok(())

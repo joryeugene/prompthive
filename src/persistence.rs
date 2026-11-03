@@ -192,6 +192,15 @@ impl Directory {
     }
 
     pub(crate) fn entries(&self) -> Result<Vec<std::ffi::OsString>> {
+        let mut budget =
+            crate::limits::Budget::new(crate::limits::IMPORT_BYTES, "directory listing");
+        self.entries_budgeted(&mut budget)
+    }
+
+    pub(crate) fn entries_budgeted(
+        &self,
+        budget: &mut crate::limits::Budget,
+    ) -> Result<Vec<std::ffi::OsString>> {
         #[cfg(any(
             target_os = "linux",
             target_os = "android",
@@ -249,6 +258,8 @@ impl Directory {
                 }
                 let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
                 if name != b"." && name != b".." {
+                    budget.add(name.len())?;
+                    budget.add(2 * std::mem::size_of::<std::ffi::OsString>())?;
                     result.push(std::ffi::OsString::from_vec(name.to_vec()));
                 }
             }
@@ -262,9 +273,13 @@ impl Directory {
             target_os = "freebsd"
         )))]
         {
-            let mut result = fs::read_dir(&self.path)?
-                .map(|entry| entry.map(|value| value.file_name()))
-                .collect::<io::Result<Vec<_>>>()?;
+            let mut result = Vec::new();
+            for entry in fs::read_dir(&self.path)? {
+                let name = entry?.file_name();
+                budget.add(name.as_encoded_bytes().len())?;
+                budget.add(2 * std::mem::size_of::<std::ffi::OsString>())?;
+                result.push(name);
+            }
             result.sort();
             Ok(result)
         }
@@ -690,6 +705,26 @@ fn fail(_stage: Stage) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn directory_listing_checks_each_name_before_vector_growth() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        fs::write(root.join("a"), b"a").unwrap();
+        fs::write(root.join("b"), b"b").unwrap();
+        let directory = Directory::open(&root, false).unwrap();
+        let exact = 2 * (1 + 2 * std::mem::size_of::<std::ffi::OsString>());
+        let mut budget = crate::limits::Budget::new(exact, "fixture directory");
+        assert_eq!(
+            directory.entries_budgeted(&mut budget).unwrap(),
+            vec![std::ffi::OsString::from("a"), std::ffi::OsString::from("b")]
+        );
+        let mut budget = crate::limits::Budget::new(exact - 1, "fixture directory");
+        assert!(directory
+            .entries_budgeted(&mut budget)
+            .unwrap_err()
+            .downcast_ref::<crate::limits::LimitError>()
+            .is_some());
+    }
     fn fail_at(stage: Stage, action: impl FnOnce()) {
         struct Reset;
         impl Drop for Reset {

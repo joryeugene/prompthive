@@ -223,13 +223,19 @@ pub(crate) struct PreparedTemplate {
 
 impl PreparedTemplate {
     pub(crate) fn compiled_bytes(&self) -> Result<usize> {
-        self.parts
-            .len()
+        let overflow =
+            || crate::limits::exceeded("compiled composition", crate::limits::IMPORT_BYTES);
+        let mut bytes = self
+            .parts
+            .capacity()
             .checked_mul(std::mem::size_of::<Part>())
-            .and_then(|size| size.checked_add(self.text_bytes))
-            .ok_or_else(|| {
-                crate::limits::exceeded("compiled composition", crate::limits::IMPORT_BYTES)
-            })
+            .ok_or_else(overflow)?;
+        for part in &self.parts {
+            if let Part::Text(text) = part {
+                bytes = bytes.checked_add(text.capacity()).ok_or_else(overflow)?;
+            }
+        }
+        Ok(bytes)
     }
     pub(crate) fn compile(
         source: &str,

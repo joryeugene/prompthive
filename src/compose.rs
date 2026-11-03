@@ -3,8 +3,10 @@
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::storage::{PromptMetadata, Storage};
-use crate::template::{validate_declarations, PreparedTemplate, RenderContext, Variables};
+use crate::storage::Storage;
+use crate::template::{
+    validate_declarations, Declarations, PreparedTemplate, RenderContext, Variables,
+};
 
 pub struct Composer {
     storage: Storage,
@@ -12,7 +14,7 @@ pub struct Composer {
 
 struct Source {
     name: String,
-    metadata: PromptMetadata,
+    vars: Declarations,
     body: String,
     bytes: usize,
 }
@@ -88,7 +90,7 @@ impl Composer {
         self.validate_supplied(&sources, supplied)?;
         Ok(sources
             .iter()
-            .flat_map(|source| source.metadata.vars.iter())
+            .flat_map(|source| source.vars.iter())
             .filter(|(name, default)| default.is_none() && !supplied.contains_key(*name))
             .map(|(name, _)| name.clone())
             .collect::<BTreeSet<_>>()
@@ -103,6 +105,15 @@ impl Composer {
         for name in names {
             let source = self.load_source(name)?;
             budget.add(source.bytes)?;
+            budget.add(source.name.len())?;
+            budget.add(2 * std::mem::size_of::<Source>())?;
+            for (name, default) in &source.vars {
+                budget.add(name.len())?;
+                budget.add(2 * std::mem::size_of::<(String, Option<String>)>())?;
+                if let Some(value) = default {
+                    budget.add(value.len())?;
+                }
+            }
             sources.push(source);
         }
         Ok(sources)
@@ -124,7 +135,7 @@ impl Composer {
             .with_context(|| format!("invalid template source {name:?}"))?;
         Ok(Source {
             name: name.to_string(),
-            metadata,
+            vars: metadata.vars,
             body,
             bytes: bytes.len(),
         })
@@ -133,9 +144,9 @@ impl Composer {
     fn validate_supplied(&self, sources: &[Source], supplied: &Variables) -> Result<()> {
         let mut declared = BTreeSet::new();
         for source in sources {
-            validate_declarations(&source.metadata.vars)
+            validate_declarations(&source.vars)
                 .with_context(|| format!("invalid variables in {:?}", source.name))?;
-            declared.extend(source.metadata.vars.keys().cloned());
+            declared.extend(source.vars.keys().cloned());
         }
         for name in supplied.keys() {
             if !declared.contains(name) {
@@ -152,13 +163,9 @@ impl Composer {
             crate::limits::Budget::new(crate::limits::IMPORT_BYTES, "compiled composition");
         let mut prepared = Vec::new();
         for source in sources {
-            let template = PreparedTemplate::compile(
-                &source.body,
-                &source.metadata.vars,
-                supplied,
-                &mut context,
-            )
-            .with_context(|| format!("cannot render {:?}", source.name))?;
+            let template =
+                PreparedTemplate::compile(&source.body, &source.vars, supplied, &mut context)
+                    .with_context(|| format!("cannot render {:?}", source.name))?;
             budget.add(template.compiled_bytes()?)?;
             prepared.push(template);
         }
@@ -180,7 +187,7 @@ pub fn parse_prompt_list(input: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::template::Declarations;
+    use crate::{template::Declarations, PromptMetadata};
     use std::fs;
     use tempfile::TempDir;
 
