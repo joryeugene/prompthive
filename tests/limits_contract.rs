@@ -14,6 +14,69 @@ struct Fixture {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn search_does_not_retain_unused_legacy_metadata_under_a_memory_cap() {
+    use std::os::unix::process::CommandExt;
+    let fixture = Fixture::new();
+    let fields = ["version", "created_at", "updated_at", "git_hash"];
+    let value = "x".repeat(850_000);
+    let mut expected = String::new();
+    for number in 0..170 {
+        let name = format!("note{number:03}");
+        let raw = format!(
+            "---\n{}: {value}\n---\n\nsmall",
+            fields[number % fields.len()]
+        );
+        assert!(raw.len() < FRONTMATTER_BYTES);
+        fs::write(
+            fixture.store.join("prompts").join(format!("{name}.md")),
+            raw,
+        )
+        .unwrap();
+        expected.push_str(&format!("{name}\n"));
+    }
+    expected.push_str("tiny\n");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ph"));
+    command
+        .args(["f", "", "-q"])
+        .env("PROMPTHIVE_BASE_DIR", &fixture.store)
+        .env("XDG_CONFIG_HOME", fixture.temporary.path().join("config"))
+        .stdin(Stdio::null());
+    unsafe {
+        command.pre_exec(|| {
+            let cap = libc::rlimit {
+                rlim_cur: 256 * 1024 * 1024,
+                rlim_max: 256 * 1024 * 1024,
+            };
+            if libc::setrlimit(libc::RLIMIT_AS, &cap) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let no_core = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            if libc::setrlimit(libc::RLIMIT_CORE, &no_core) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let result = command.output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(result.stderr.is_empty());
+    assert_eq!(result.stdout, expected.as_bytes());
+    assert_eq!(
+        fs::read_to_string(fixture.store.join("prompts/note000.md")).unwrap(),
+        format!("---\nversion: {value}\n---\n\nsmall")
+    );
+    assert!(!fixture.store.join(".versions").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn expanded_yaml_aliases_fail_cleanly_under_a_process_memory_cap() {
     use std::os::unix::process::CommandExt;
     let fixture = Fixture::new();

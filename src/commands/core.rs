@@ -141,10 +141,12 @@ fn readable_prompts(storage: &Storage) -> Result<Vec<Prompt>> {
             name: name.clone(),
             short_code: String::new(),
             description: meta.description,
-            version: meta.version,
-            created_at: meta.created_at,
-            updated_at: meta.updated_at,
-            git_hash: meta.git_hash,
+            // Discovery uses names and descriptions only. Do not retain and
+            // clone arbitrary legacy metadata for every search keystroke.
+            version: None,
+            created_at: None,
+            updated_at: None,
+            git_hash: None,
         });
     }
     Ok(prompts)

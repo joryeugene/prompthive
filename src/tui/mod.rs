@@ -305,10 +305,12 @@ fn load_entries_with_budget(storage: &Storage, limit: usize) -> Result<Vec<Entry
                     name,
                     short_code: String::new(),
                     description: metadata.description,
-                    version: metadata.version,
-                    created_at: metadata.created_at,
-                    updated_at: metadata.updated_at,
-                    git_hash: metadata.git_hash,
+                    // These fields are never displayed or matched. Keep the
+                    // original metadata on disk, outside the discovery index.
+                    version: None,
+                    created_at: None,
+                    updated_at: None,
+                    git_hash: None,
                 },
                 body,
                 error: None,
