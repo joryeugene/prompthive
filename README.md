@@ -10,14 +10,14 @@ Meet **Byt** (pronounced *byte*).
 
 ## Install
 
-The current published release is [v0.3.0 on GitHub](https://github.com/joryeugene/prompthive/releases/tag/v0.3.0). Download and extract a source archive, then run these commands from its directory:
+Download and extract a [v0.4.0 source archive from GitHub](https://github.com/joryeugene/prompthive/releases/tag/v0.4.0), then run these commands from its directory:
 
 ```sh
 cargo install --path . --locked
 ph --version
 ```
 
-Crates.io still contains the older 0.2.8 package. This development branch contains the **unreleased 0.4.0 candidate** described below; install it from this checkout with the same source command. Neither channel updates automatically.
+This is a GitHub-only source release. `cargo install prompthive` uses crates.io and does not install this release. An existing installation does not update automatically; run the source command above to replace it.
 
 The default build includes the terminal picker. For a smaller build without it, add `--no-default-features`; exact-name commands and pipelines remain available.
 
