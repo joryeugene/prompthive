@@ -178,6 +178,7 @@ def cancellation_case(binary, bash, timeout, key):
             return {'case': 'piped-context-' + ('escape' if key == b'\x1b' else 'ctrl-c'),
                     'command': 'printf ctx | ph', 'injected_key_hex': key.hex(),
                     'exit': child.returncode, 'checks': checks, 'passed': all(checks.values()),
+                    'terminal_output_tail': output[-8000:].decode('utf-8', errors='replace') if not all(checks.values()) else None,
                     'terminal_sha256': hashlib.sha256(output).hexdigest(), 'timeout_seconds': timeout}
         finally:
             os.close(master)
