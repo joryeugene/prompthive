@@ -67,6 +67,11 @@ impl Directory {
             let mut current = PathBuf::new();
             for part in path.components() {
                 current.push(part.as_os_str());
+                // A Windows drive/verbatim prefix is not a complete path until
+                // its root separator arrives. Never stat a partial \?\C: prefix.
+                if matches!(part, Component::Prefix(_)) {
+                    continue;
+                }
                 match fs::symlink_metadata(&current) {
                     Ok(meta) if meta.file_type().is_symlink() => {
                         bail!("symlink directory is not allowed: {}", current.display())
@@ -733,12 +738,30 @@ mod tests {
 mod boundary_tests {
     use super::*;
 
+    #[cfg(windows)]
+    #[test]
+    fn canonical_windows_prefix_opens_without_inspecting_partial_drive_path() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temporary.path()).unwrap();
+        let directory = Directory::open(&root, false).unwrap();
+        directory
+            .write_atomic(std::ffi::OsStr::new("note.md"), b"complete", false, None)
+            .unwrap();
+        assert_eq!(
+            directory.read(std::ffi::OsStr::new("note.md")).unwrap().0,
+            b"complete"
+        );
+    }
+
     #[test]
     fn directory_listings_have_independent_cursors() {
         let temporary = tempfile::tempdir().unwrap();
-        fs::write(temporary.path().join("first"), b"a").unwrap();
-        fs::write(temporary.path().join("second"), b"b").unwrap();
-        let directory = Directory::open(temporary.path(), false).unwrap();
+        // Directory takes a resolved root. macOS's /var temp alias is resolved
+        // before the test introduces its adversarial child symlink.
+        let root = fs::canonicalize(temporary.path()).unwrap();
+        fs::write(root.join("first"), b"a").unwrap();
+        fs::write(root.join("second"), b"b").unwrap();
+        let directory = Directory::open(&root, false).unwrap();
         let first = directory.entries().unwrap();
         assert_eq!(first.len(), 2);
         assert_eq!(directory.entries().unwrap(), first);
@@ -755,12 +778,15 @@ mod boundary_tests {
     #[test]
     fn a_second_writer_cannot_acquire_an_existing_store_lock() {
         let temporary = tempfile::tempdir().unwrap();
-        let directory = Directory::open(temporary.path(), false).unwrap();
+        // Directory takes a resolved root. macOS's /var temp alias is resolved
+        // before the test introduces its adversarial child symlink.
+        let root = fs::canonicalize(temporary.path()).unwrap();
+        let directory = Directory::open(&root, false).unwrap();
         let lock = directory.lock_file().unwrap();
         let contender = fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .open(temporary.path().join(".write.lock"))
+            .open(root.join(".write.lock"))
             .unwrap();
         assert!(contender.try_lock().is_err());
         drop(lock);
@@ -771,17 +797,16 @@ mod boundary_tests {
     #[test]
     fn checked_directory_handle_is_not_redirected_by_parent_symlink_swap() {
         let temporary = tempfile::tempdir().unwrap();
+        // Directory takes a resolved root. macOS's /var temp alias is resolved
+        // before the test introduces its adversarial child symlink.
+        let root = fs::canonicalize(temporary.path()).unwrap();
         let outside = tempfile::tempdir().unwrap();
-        fs::create_dir(temporary.path().join("prompts")).unwrap();
-        fs::write(temporary.path().join("prompts/note.md"), b"original").unwrap();
+        fs::create_dir(root.join("prompts")).unwrap();
+        fs::write(root.join("prompts/note.md"), b"original").unwrap();
         fs::write(outside.path().join("note.md"), b"outside").unwrap();
-        let checked = Directory::open(&temporary.path().join("prompts"), false).unwrap();
-        fs::rename(
-            temporary.path().join("prompts"),
-            temporary.path().join("retained"),
-        )
-        .unwrap();
-        std::os::unix::fs::symlink(outside.path(), temporary.path().join("prompts")).unwrap();
+        let checked = Directory::open(&root.join("prompts"), false).unwrap();
+        fs::rename(root.join("prompts"), root.join("retained")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("prompts")).unwrap();
         checked
             .write_atomic(
                 std::ffi::OsStr::new("note.md"),
@@ -791,13 +816,13 @@ mod boundary_tests {
             )
             .unwrap();
         assert_eq!(
-            fs::read(temporary.path().join("retained/note.md")).unwrap(),
+            fs::read(root.join("retained/note.md")).unwrap(),
             b"safe replacement"
         );
         assert_eq!(
             fs::read(outside.path().join("note.md")).unwrap(),
             b"outside"
         );
-        assert!(Directory::open(&temporary.path().join("prompts"), false).is_err());
+        assert!(Directory::open(&root.join("prompts"), false).is_err());
     }
 }

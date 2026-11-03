@@ -1397,3 +1397,38 @@ fn listing_and_discovery_keep_their_explicit_destinations() {
         fixture.fail(&["f", "rev", "-c", "-q"], b"", 4);
     }
 }
+
+#[test]
+fn tagged_unknown_metadata_stays_inert_through_read_rename_and_export() {
+    let fixture = Fixture::new();
+    let private = fixture.temporary.path().join("not-a-template");
+    fs::write(&private, b"SYNTHETIC_NEVER_INCLUDE_38b1").unwrap();
+    let raw = format!("---\nid: note\ncustom: !include {}\nnested: {{value: !arbitrary [one, two]}}\n---\n\nBody {{input}}", private.display());
+    fixture.raw("note", &raw);
+    assert_eq!(
+        fixture.success(&["s", "note", "-q"], b"").stdout,
+        b"Body {input}"
+    );
+    assert_eq!(
+        fixture.success(&["u", "note", "literal", "-q"], b"").stdout,
+        b"Body literal"
+    );
+    assert_eq!(fs::read(fixture.path("note")).unwrap(), raw.as_bytes());
+    fixture.success(&["r", "note", "notes/renamed"], b"");
+    fixture.prompt("addition", "Added");
+    fixture.success(&["s", "addition", "-a", "notes/renamed", "-q"], b"");
+    assert_eq!(
+        fixture.success(&["s", "notes/renamed", "-q"], b"").stdout,
+        b"Body {input}\n\nAdded"
+    );
+    let renamed = fs::read_to_string(fixture.path("notes/renamed")).unwrap();
+    assert!(renamed.contains("!include"));
+    assert!(renamed.contains("!arbitrary"));
+    let export = fixture.temporary.path().join("portable-tags");
+    fixture.success(&["export", export.to_str().unwrap()], b"");
+    assert_eq!(
+        fs::read(export.join("banks/notes/renamed.md")).unwrap(),
+        renamed.as_bytes()
+    );
+    assert_eq!(fs::read(private).unwrap(), b"SYNTHETIC_NEVER_INCLUDE_38b1");
+}

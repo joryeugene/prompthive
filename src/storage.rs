@@ -325,13 +325,46 @@ impl Storage {
                         .as_mapping()
                         .context("vars must be a mapping of names to string or null")?;
                     for (name, default) in vars {
-                        if name.as_str().is_none() || (!default.is_null() && !default.is_string()) {
+                        if !matches!(name, serde_yaml::Value::String(_))
+                            || !matches!(
+                                default,
+                                serde_yaml::Value::Null | serde_yaml::Value::String(_)
+                            )
+                        {
                             bail!("vars names must be strings and defaults must be string or null");
                         }
                     }
                 }
-                let metadata: PromptMetadata =
-                    serde_yaml::from_value(value).context("invalid prompt metadata")?;
+                // Serde's flatten buffer cannot carry YAML enum/tag values.
+                // Deserialize the known fields separately, retaining unknown YAML
+                // nodes intact instead of passing them through that buffer.
+                let mut fields = value.as_mapping().expect("mapping checked above").clone();
+                let mut known = serde_yaml::Mapping::new();
+                for name in [
+                    "id",
+                    "description",
+                    "tags",
+                    "created_at",
+                    "updated_at",
+                    "version",
+                    "git_hash",
+                    "parent_version",
+                    "vars",
+                ] {
+                    let key = serde_yaml::Value::String(name.into());
+                    if let Some(value) = fields.remove(&key) {
+                        known.insert(key, value);
+                    }
+                }
+                let mut metadata: PromptMetadata =
+                    serde_yaml::from_value(serde_yaml::Value::Mapping(known))
+                        .context("invalid prompt metadata")?;
+                for (key, value) in fields {
+                    let serde_yaml::Value::String(name) = key else {
+                        bail!("frontmatter field names must be untagged strings");
+                    };
+                    metadata.extra.insert(name, value);
+                }
                 crate::template::validate_declarations(&metadata.vars)?;
                 let mut start = if end < content.len() { end + 1 } else { end };
                 // One optional conventional blank line separates frontmatter/body.
@@ -1074,6 +1107,33 @@ mod tests {
         assert_eq!(roundtrip.extra, metadata.extra);
         assert_eq!(roundtrip.vars, metadata.vars);
         assert_eq!(roundtrip_body, body);
+    }
+
+    #[test]
+    fn unknown_yaml_tags_are_inert_and_survive_metadata_mutations() {
+        let (_temp, storage) = store();
+        let text = "---\nid: note\ncustom: !include /must-not-be-read\nnested: {object: !arbitrary [one, two]}\n---\n\nBody {input}\n";
+        storage.write_raw("note", text.as_bytes(), false).unwrap();
+        let (metadata, body) = storage.read_prompt("note").unwrap();
+        assert_eq!(body, "Body {input}\n");
+        assert!(matches!(
+            metadata.extra["custom"],
+            serde_yaml::Value::Tagged(_)
+        ));
+        let serialized = Storage::serialize_prompt(&metadata, &body).unwrap();
+        let (roundtrip, roundtrip_body) = storage
+            .parse_prompt_content(std::str::from_utf8(&serialized).unwrap())
+            .unwrap();
+        assert_eq!(roundtrip.extra, metadata.extra);
+        assert_eq!(roundtrip_body, body);
+        storage.rename_prompt("note", "notes/renamed").unwrap();
+        let (renamed, renamed_body) = storage.read_prompt("notes/renamed").unwrap();
+        assert_eq!(renamed.extra, metadata.extra);
+        assert_eq!(renamed_body, body);
+        assert_eq!(renamed.id, metadata.id);
+        assert!(storage
+            .parse_prompt_content("---\nvars: {language: !custom Rust}\n---\nBody")
+            .is_err());
     }
 
     #[test]
