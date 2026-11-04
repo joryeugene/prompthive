@@ -188,6 +188,33 @@ fn listing(prompts: &[Prompt], descriptions: bool) -> Result<String> {
     }
     Ok(text)
 }
+fn browse(storage: &Storage, input: &str, query: &str) -> Result<()> {
+    #[cfg(feature = "tui")]
+    {
+        use crate::tui::BareSelection;
+        match crate::tui::pick_bare(storage, input, query)?
+            .ok_or_else(|| fail(130, "Cancelled; no prompt was used."))?
+        {
+            BareSelection::Use(name, text) => {
+                IoOptions::default().emit(storage, &text, &name, None)
+            }
+            BareSelection::Show(name) => {
+                let (_, text) = storage.read_prompt(&name)?;
+                write_stdout(&safe_terminal_body(&text)?)
+            }
+            BareSelection::Edit(name) => {
+                crate::edit::edit_prompt(storage, &name)?;
+                eprintln!("Saved {name}.");
+                Ok(())
+            }
+        }
+    }
+    #[cfg(not(feature = "tui"))]
+    {
+        let _ = (storage, input, query);
+        unreachable!("interactive() is false without the tui feature")
+    }
+}
 pub fn run(command: Option<Commands>) -> Result<()> {
     let start = Instant::now();
     if command.is_none() {
@@ -204,29 +231,7 @@ pub fn run(command: Option<Commands>) -> Result<()> {
         }
         let storage = Storage::new()?;
         storage.init()?;
-        #[cfg(feature = "tui")]
-        {
-            use crate::tui::BareSelection;
-            return match crate::tui::pick_bare(&storage, &input)?
-                .ok_or_else(|| fail(130, "Cancelled; no prompt was used."))?
-            {
-                BareSelection::Use(name, text) => {
-                    IoOptions::default().emit(&storage, &text, &name, None)
-                }
-                BareSelection::Show(name) => {
-                    let (_, text) = storage.read_prompt(&name)?;
-                    let safe = safe_terminal_body(&text)?;
-                    write_stdout(&safe)
-                }
-                BareSelection::Edit(name) => {
-                    crate::edit::edit_prompt(&storage, &name)?;
-                    eprintln!("Saved {name}.");
-                    Ok(())
-                }
-            };
-        }
-        #[cfg(not(feature = "tui"))]
-        unreachable!("interactive() is false without the tui feature");
+        return browse(&storage, &input, "");
     }
     // Help/completions do not create or inspect a store.
     if let Some(Commands::Completion { shell }) = command {
@@ -340,9 +345,8 @@ pub fn run(command: Option<Commands>) -> Result<()> {
             let input=read_input(None)?;
             if !interactive(){return Err(fail(2,"terminal preview is unavailable; use ph f QUERY then ph u EXACT_NAME"));}
             storage.init()?;
-            // t is an explicit discovery request even when SEARCH is an exact name.
-            let (name,text)=render_use(&storage,search.as_deref(),None,&input,&Default::default(),|name|IoOptions::default().confirmation(name),true)?;
-            IoOptions::default().emit(&storage,&text,&name,None)
+            // Explicit tui always opens discovery, including for an exact search.
+            browse(&storage, &input, search.as_deref().unwrap_or(""))
         }
         Commands::Export{path}=>{
             let count=crate::portability::export_store(&storage,std::path::Path::new(&path))?;

@@ -291,6 +291,7 @@ impl Drop for TerminalSession {
 struct Entry {
     prompt: Prompt,
     body: String,
+    has_description: bool,
     error: Option<String>,
     editable: bool,
 }
@@ -303,8 +304,8 @@ fn load_entries_with_budget(storage: &Storage, limit: usize) -> Result<Vec<Entry
     let mut budget = crate::limits::Budget::new(limit, "picker library");
     let mut entries = Vec::new();
     for name in storage.list_prompts()? {
-        let entry = match storage.read_prompt(&name) {
-            Ok((metadata, body)) => Entry {
+        let entry = match storage.read_prompt_with_description_origin(&name) {
+            Ok((metadata, body, has_description)) => Entry {
                 prompt: Prompt {
                     name,
                     short_code: String::new(),
@@ -317,6 +318,7 @@ fn load_entries_with_budget(storage: &Storage, limit: usize) -> Result<Vec<Entry
                     git_hash: None,
                 },
                 body,
+                has_description,
                 error: None,
                 editable: true,
             },
@@ -363,6 +365,7 @@ fn load_entries_with_budget(storage: &Storage, limit: usize) -> Result<Vec<Entry
                         git_hash: None,
                     },
                     body: String::new(),
+                    has_description: false,
                     editable,
                     error: Some(format!("{problem}\n{recovery}\npath: {location}")),
                 }
@@ -391,13 +394,13 @@ pub enum BareSelection {
     Edit(String),
 }
 
-pub fn pick_bare(storage: &Storage, input: &str) -> Result<Option<BareSelection>> {
+pub fn pick_bare(storage: &Storage, input: &str, query: &str) -> Result<Option<BareSelection>> {
     let composer = crate::Composer::new(storage.clone());
     let supplied = Variables::default();
     let destination = |name: &str| crate::IoOptions::default().confirmation(name);
     pick_with(
         storage,
-        "",
+        query,
         PickerIntent::Browse,
         |name| Some(destination(name)),
         |name, action, terminal, interrupted| match action {
@@ -454,7 +457,7 @@ struct PickerState {
     preview_scroll: usize,
     max_scroll: usize,
     page_height: usize,
-    preview_layout: Option<(usize, u16, usize)>,
+    preview_layout: Option<(usize, u16, usize, usize)>,
     identity_visible: bool,
     message: Option<String>,
 }
@@ -594,14 +597,15 @@ impl PickerState {
                 }
             }
             KeyCode::PageDown => {
-                self.preview_scroll = self
-                    .preview_scroll
-                    .saturating_add(self.page_height)
+                self.preview_scroll = (self.preview_scroll / self.page_height)
+                    .saturating_add(1)
+                    .saturating_mul(self.page_height)
                     .min(self.max_scroll);
                 self.message = None;
             }
             KeyCode::PageUp => {
-                self.preview_scroll = self.preview_scroll.saturating_sub(self.page_height);
+                self.preview_scroll =
+                    self.preview_scroll.saturating_sub(1) / self.page_height * self.page_height;
                 self.message = None;
             }
             KeyCode::Left => {
@@ -678,7 +682,7 @@ impl PickerState {
             return;
         }
         let area = Rect {
-            height: outer.height.min(12),
+            height: outer.height.min(18),
             ..outer
         };
         let prefix_text = if self.intent == PickerIntent::Edit {
@@ -771,27 +775,28 @@ impl PickerState {
                 ]);
             }
         }
-        let footer_height = destination_lines.len().saturating_add(2);
+        let show_actions = self.intent == PickerIntent::Browse && self.action_focus;
+        let control_lines = if show_actions { 2 } else { 1 };
+        let footer_height = destination_lines.len().saturating_add(control_lines);
         let identity_height = self
             .selected()
             .map(|entry| {
                 let name = safe_text(&entry.prompt.name);
-                if !name.contains('\n')
-                    && Line::from(name.clone()).width() <= area.width.saturating_sub(2) as usize
-                {
-                    0
+                let detail_width = if area.width >= 80 {
+                    area.width.saturating_sub(area.width / 3 + 2)
                 } else {
-                    wrap_text(&format!("id · {name}"), area.width).len()
-                }
+                    area.width
+                };
+                wrap_text(&format!("id · {name}"), detail_width).len()
             })
             .unwrap_or(1);
         let required_height = footer_height
             .saturating_add(identity_height)
-            .saturating_add(6);
+            .saturating_add(8);
         let area = Rect {
             height: outer
                 .height
-                .min((required_height.min(u16::MAX as usize) as u16).max(12)),
+                .min((required_height.min(u16::MAX as usize) as u16).max(18)),
             ..outer
         };
         if footer_height.saturating_add(7) > area.height as usize {
@@ -816,7 +821,7 @@ impl PickerState {
                 Paragraph::new(destination_lines),
                 Rect {
                     y: footer_y,
-                    height: (footer_height - 2) as u16,
+                    height: (footer_height - control_lines) as u16,
                     ..area
                 },
             );
@@ -832,7 +837,7 @@ impl PickerState {
         let action_nav = if self.action_focus {
             "tab search · ←/→ · enter · esc"
         } else {
-            "tab actions · enter use · esc"
+            "tab actions · enter · esc"
         };
         let nav = if identity_hidden {
             "resize · esc cancel"
@@ -855,7 +860,7 @@ impl PickerState {
                 "tab actions · esc cancel"
             }
         } else if blocked {
-            "arrows · esc cancel · cannot use"
+            "cannot use · esc · ph --help"
         } else if self.intent == PickerIntent::Edit {
             "arrows · enter edit · esc cancel"
         } else if self.intent == PickerIntent::Browse {
@@ -866,7 +871,7 @@ impl PickerState {
         frame.render_widget(
             Paragraph::new(nav),
             Rect {
-                y: area.y + area.height - 2,
+                y: area.y + area.height - 1,
                 height: 1,
                 ..area
             },
@@ -897,17 +902,19 @@ impl PickerState {
         } else {
             Line::from("ph --help")
         };
-        frame.render_widget(
-            Paragraph::new(actions),
-            Rect {
-                y: area.y + area.height - 1,
-                height: 1,
-                ..area
-            },
-        );
+        if show_actions {
+            frame.render_widget(
+                Paragraph::new(actions),
+                Rect {
+                    y: area.y + area.height - 2,
+                    height: 1,
+                    ..area
+                },
+            );
+        }
         let content = Rect {
             y: area.y + 1,
-            height: footer_y.saturating_sub(area.y + 1),
+            height: footer_y.saturating_sub(area.y + 2),
             ..area
         };
         if self.entries.is_empty() {
@@ -937,14 +944,24 @@ impl PickerState {
             return;
         };
         let selected = &self.entries[index];
-        let name = safe_text(&selected.prompt.name);
-        let identity = if !name.contains('\n')
-            && Line::from(name.clone()).width() <= content.width.saturating_sub(2) as usize
-        {
-            Vec::new()
+        let split = content.width >= 80;
+        let left_width = if split {
+            content.width / 3
         } else {
-            wrap_text(&format!("id · {name}"), content.width)
+            content.width
         };
+        let detail_x = if split {
+            content.x + left_width + 2
+        } else {
+            content.x
+        };
+        let detail_width = if split {
+            content.width.saturating_sub(left_width + 2)
+        } else {
+            content.width
+        };
+        let name = safe_text(&selected.prompt.name);
+        let identity = wrap_text(&format!("id · {name}"), detail_width);
         let identity_height = identity.len();
         if identity_height.saturating_add(5) > content.height as usize {
             frame.render_widget(
@@ -964,7 +981,8 @@ impl PickerState {
             .clamp(1, 3)
             .min(self.filtered.len()) as u16;
         let list_area = Rect {
-            height: list_height,
+            height: if split { content.height } else { list_height },
+            width: left_width,
             ..content
         };
         let items = self
@@ -983,48 +1001,77 @@ impl PickerState {
             &mut self.selection,
         );
         let identity_area = Rect {
-            y: list_area.y + list_height,
+            x: detail_x,
+            y: if split {
+                content.y
+            } else {
+                list_area.y + list_height
+            },
+            width: detail_width,
             height: identity_height as u16,
-            ..content
         };
         frame.render_widget(Paragraph::new(identity), identity_area);
         let label_area = Rect {
-            y: identity_area.y + identity_area.height + 1,
+            y: identity_area.y + identity_area.height,
             height: 1,
-            x: content.x + 2,
-            width: content.width.saturating_sub(2),
+            x: detail_x + 2,
+            width: detail_width.saturating_sub(2),
         };
         let body_area = Rect {
             y: label_area.y + 1,
-            x: content.x + 2,
-            width: content.width.saturating_sub(2),
+            x: detail_x + 2,
+            width: detail_width.saturating_sub(2),
             height: content
                 .y
                 .saturating_add(content.height)
                 .saturating_sub(label_area.y + 1),
         };
-        let preview = selected.error.as_deref().unwrap_or(&selected.body);
+        let has_description = selected.has_description && selected.error.is_none();
+        let preview = selected.error.as_deref().unwrap_or_else(|| {
+            if selected.body.is_empty() {
+                "empty prompt"
+            } else {
+                &selected.body
+            }
+        });
         self.page_height = (body_area.height as usize).max(1);
         let mut lines = None;
-        let total = match self.preview_layout {
-            Some((cached_index, width, total))
+        let (total, description_rows) = match self.preview_layout {
+            Some((cached_index, width, total, description_rows))
                 if cached_index == index && width == body_area.width =>
             {
-                total
+                (total, description_rows)
             }
             _ => {
-                let (page, total) = guided::counted_preview(
-                    preview,
-                    body_area.width,
-                    self.preview_scroll,
-                    self.page_height,
-                );
+                let (page, total) = if has_description {
+                    guided::detail_preview(
+                        &selected.prompt.description,
+                        preview,
+                        body_area.width,
+                        self.preview_scroll,
+                        self.page_height,
+                        true,
+                    )
+                } else {
+                    guided::counted_preview(
+                        preview,
+                        body_area.width,
+                        self.preview_scroll,
+                        self.page_height,
+                    )
+                };
+                let description_rows = if has_description {
+                    guided::description_row_count(&selected.prompt.description, body_area.width)
+                } else {
+                    0
+                };
                 lines = Some(page);
-                self.preview_layout = Some((index, body_area.width, total));
-                total
+                self.preview_layout = Some((index, body_area.width, total, description_rows));
+                (total, description_rows)
             }
         };
         self.max_scroll = total.saturating_sub(body_area.height as usize);
+        let scroll = self.preview_scroll.min(self.max_scroll);
         let blocked = self.message.as_deref().is_some_and(|message| {
             message.starts_with("cannot use this prompt.")
                 || message.starts_with("cannot edit this prompt")
@@ -1035,23 +1082,54 @@ impl PickerState {
             selected.error.is_some(),
             self.max_scroll > 0,
         ) {
-            (true, PickerIntent::Edit, _, true) => "cannot edit · pgup/pgdn",
-            (true, PickerIntent::Edit, _, false) => "cannot edit · see details",
-            (true, _, _, true) => "cannot use · pgup/pgdn",
-            (true, _, _, false) => "cannot use · see details",
-            (false, _, true, true) => "cannot read prompt · pgup/pgdn",
-            (false, _, true, false) => "cannot read prompt",
-            (false, _, false, true) => "preview · pgup/pgdn",
-            (false, _, false, false) => "preview",
+            (true, PickerIntent::Edit, _, true) => "cannot edit · pgup/pgdn".to_owned(),
+            (true, PickerIntent::Edit, _, false) => "cannot edit · see details".to_owned(),
+            (true, _, _, true) => "cannot use · pgup/pgdn".to_owned(),
+            (true, _, _, false) => "cannot use · see details".to_owned(),
+            (false, _, true, true) => "cannot read prompt · pgup/pgdn".to_owned(),
+            (false, _, true, false) => "cannot read prompt".to_owned(),
+            (false, _, false, paged) if has_description => {
+                let description_visible = scroll < description_rows;
+                let body_visible = scroll.saturating_add(self.page_height) > description_rows + 2;
+                let section = match (description_visible, body_visible) {
+                    (true, true) => "description + preview",
+                    (true, false) => "description",
+                    (false, _) => "preview",
+                };
+                if paged {
+                    let pages = total.div_ceil(self.page_height);
+                    let page = if scroll == self.max_scroll {
+                        pages
+                    } else {
+                        scroll / self.page_height + 1
+                    };
+                    detail_page_label(section, page, pages, body_area.width)
+                } else {
+                    section.to_owned()
+                }
+            }
+            (false, _, false, true) => "preview · pgup/pgdn".to_owned(),
+            (false, _, false, false) => "preview".to_owned(),
         };
         frame.render_widget(Paragraph::new(label).style(accent), label_area);
-        let scroll = self.preview_scroll.min(self.max_scroll);
         if scroll != self.preview_scroll {
             lines = None;
         }
         self.preview_scroll = scroll;
         let lines = lines.unwrap_or_else(|| {
-            guided::preview_lines(preview, body_area.width, scroll, self.page_height)
+            if has_description {
+                guided::detail_preview(
+                    &selected.prompt.description,
+                    preview,
+                    body_area.width,
+                    scroll,
+                    self.page_height,
+                    false,
+                )
+                .0
+            } else {
+                guided::preview_lines(preview, body_area.width, scroll, self.page_height)
+            }
         });
         if let Some(message) = self.message.as_ref().filter(|_| !blocked) {
             frame.render_widget(
@@ -1068,6 +1146,25 @@ impl PickerState {
             frame.render_widget(Paragraph::new(lines), body_area);
         }
     }
+}
+
+fn detail_page_label(section: &str, page: usize, pages: usize, width: u16) -> String {
+    let compact = match section {
+        "description + preview" => "both",
+        "description" => "desc",
+        _ => "body",
+    };
+    let choices = [
+        format!("{section} {page}/{pages} · pgup/pgdn"),
+        format!("{compact} {page}/{pages} pgup/pgdn"),
+        format!("{compact} {page}/{pages}"),
+        format!("{compact} · pgup/pgdn"),
+        compact.to_owned(),
+    ];
+    choices
+        .into_iter()
+        .find(|text| Line::from(text.clone()).width() <= width as usize)
+        .unwrap_or_default()
 }
 
 fn shell_selector(name: &str) -> String {
@@ -1173,6 +1270,7 @@ mod tests {
                 git_hash: None,
             },
             body: body.into(),
+            has_description: true,
             error: None,
             editable: true,
         }
@@ -1190,6 +1288,182 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn clamped_last_page_returns_to_previous_page() {
+        let mut state = PickerState::new(vec![entry("item", "body")], "");
+        state.page_height = 5;
+        state.max_scroll = 6;
+        state.key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(state.preview_scroll, 5);
+        state.key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(state.preview_scroll, 6);
+        state.key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert_eq!(state.preview_scroll, 5);
+        state.key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert_eq!(state.preview_scroll, 0);
+    }
+
+    #[test]
+    fn detail_page_labels_fit_narrow_terminals_with_large_counts() {
+        for section in ["description", "description + preview", "preview"] {
+            for width in [30, 38, 50] {
+                let label = detail_page_label(section, 999_999, 1_000_000, width);
+                assert!(
+                    Line::from(label.clone()).width() <= width as usize,
+                    "{label}"
+                );
+                assert!(label.contains("999999/1000000"), "{label}");
+                assert!(label.contains("pgup/pgdn"), "{label}");
+            }
+        }
+    }
+
+    #[test]
+    fn selected_description_is_grouped_and_word_wrapped_on_narrow_terminal() {
+        let mut review = entry("review", "Body text to inspect.");
+        review.prompt.description =
+            "Find correctness and maintainability problems in a change".into();
+        let mut state = PickerState::new(vec![review, entry("sql-review", "Other body")], "review");
+        state.intent = PickerIntent::Browse;
+        state.destination = Some("Copy to clipboard; show text if unavailable".into());
+        let screen = painted(&mut state, 40, 18);
+        let rows: Vec<_> = screen.lines().map(str::trim).collect();
+        let id = rows.iter().position(|line| *line == "id · review").unwrap();
+        assert!(
+            rows[id + 1].starts_with("description")
+                && rows[id + 2].starts_with("Find correctness and maintainability"),
+            "{screen}"
+        );
+        assert!(rows[id + 3].starts_with("problems in a change"), "{screen}");
+        let preview = rows
+            .iter()
+            .position(|line| line.starts_with("Body text"))
+            .unwrap();
+        let effect = rows
+            .iter()
+            .position(|line| line.starts_with("use · copy"))
+            .unwrap();
+        assert!(rows[preview + 1..effect].contains(&""), "{screen}");
+    }
+
+    #[test]
+    fn long_identity_and_description_leave_preview_reachable() {
+        let name = "long-identity-".repeat(4);
+        let mut item = entry(&name, "BODY MUST REMAIN VISIBLE");
+        item.prompt.description = "A lengthy description with separate words ".repeat(8);
+        let mut state = PickerState::new(vec![item], "");
+        state.intent = PickerIntent::Browse;
+        state.destination = Some("Copy to clipboard; show text if unavailable".into());
+        let first = painted(&mut state, 40, 18);
+        assert!(first.contains("pgup/pgdn"), "{first}");
+        for _ in 0..20 {
+            if painted(&mut state, 40, 18).contains("BODY MUST REMAIN VISIBLE") {
+                return;
+            }
+            state.key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        }
+        panic!("body is not reachable after paging");
+    }
+
+    #[test]
+    fn full_multiline_description_and_body_are_pageable_at_both_widths() {
+        for width in [40, 80] {
+            let mut review = entry(
+                "review",
+                &format!("BODYSTART {} BODYEND", "body words ".repeat(40)),
+            );
+            review.prompt.description = format!(
+                "DESCSTART café 🦀\n{} DESCEND",
+                (0..60)
+                    .map(|index| format!("D{index:03} "))
+                    .collect::<String>()
+            );
+            let mut state = PickerState::new(vec![review], "review");
+            state.intent = PickerIntent::Browse;
+            state.destination = Some("Copy to clipboard; show text if unavailable".into());
+            let mut observed = String::new();
+            let first = painted(&mut state, width, 18);
+            assert!(
+                first.contains("description") && first.contains("1/"),
+                "{first}"
+            );
+            for _ in 0..30 {
+                let screen = painted(&mut state, width, 18);
+                assert!(screen.contains("id · review"), "{screen}");
+                assert!(screen.contains("use · copy"), "{screen}");
+                observed.push_str(&screen);
+                if state.preview_scroll == state.max_scroll {
+                    break;
+                }
+                state.key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+            }
+            for marker in ["DESCSTART", "café", "DESCEND", "BODYSTART", "BODYEND"] {
+                assert!(
+                    observed.contains(marker),
+                    "missing {marker} at width {width}"
+                );
+            }
+            for index in 0..60 {
+                let token = format!("D{index:03}");
+                assert!(
+                    observed.contains(&token),
+                    "missing {token} at width {width}"
+                );
+            }
+            let last = painted(&mut state, width, 18);
+            assert!(last.contains("preview "), "{last}");
+            assert!(last.contains("pgup/pgdn"), "{last}");
+            state.key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+            assert!(state.preview_scroll < state.max_scroll);
+        }
+    }
+
+    #[test]
+    fn picker_shows_stored_description_separately_from_body() {
+        let directory = tempfile::tempdir().unwrap();
+        let prompts = directory.path().join("prompts");
+        std::fs::create_dir(&prompts).unwrap();
+        std::fs::write(
+            prompts.join("review.md"),
+            "---\ndescription: Find correctness bugs\n---\nInspect the proposed patch.\n",
+        )
+        .unwrap();
+        let storage = Storage::new_with_base(directory.path().to_path_buf()).unwrap();
+        let mut state = PickerState::new(load_entries(&storage).unwrap(), "correctness");
+        let screen = painted(&mut state, 80, 24);
+        assert!(screen.contains("Find correctness bugs"), "{screen}");
+        assert!(screen.contains("Inspect the proposed patch."), "{screen}");
+    }
+
+    #[test]
+    fn empty_prompt_has_an_explicit_preview_without_changing_body() {
+        let item = entry("empty", "");
+        let mut state = PickerState::new(vec![item], "empty");
+        let screen = painted(&mut state, 40, 18);
+        assert!(screen.contains("empty prompt"), "{screen}");
+        assert!(state.entries[0].body.is_empty());
+    }
+
+    #[test]
+    fn picker_does_not_repeat_body_fallback_as_description() {
+        let directory = tempfile::tempdir().unwrap();
+        let prompts = directory.path().join("prompts");
+        std::fs::create_dir(&prompts).unwrap();
+        std::fs::write(
+            prompts.join("note.md"),
+            "Distinct first body line.\nSecond line.\n",
+        )
+        .unwrap();
+        let storage = Storage::new_with_base(directory.path().to_path_buf()).unwrap();
+        let mut state = PickerState::new(load_entries(&storage).unwrap(), "Distinct");
+        let screen = painted(&mut state, 80, 24);
+        assert_eq!(
+            screen.matches("Distinct first body line.").count(),
+            1,
+            "{screen}"
+        );
     }
 
     #[test]

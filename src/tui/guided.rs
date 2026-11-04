@@ -424,6 +424,35 @@ pub(super) fn preview_lines(
     preview_page(text, width, skip, count, false).lines
 }
 
+/// Page a description and body without copying either complete string.
+pub(super) fn detail_preview(
+    description: &str,
+    body: &str,
+    width: u16,
+    skip: usize,
+    count: usize,
+    scan_all: bool,
+) -> (Vec<Line<'static>>, usize) {
+    let lines = description
+        .split('\n')
+        .map(|line| (line, true))
+        .chain([("", false), ("preview", false)])
+        .chain(body.split('\n').map(|line| (line, false)));
+    let page = preview_logical_lines(lines, width, skip, count, scan_all);
+    (page.lines, page.row)
+}
+
+pub(super) fn description_row_count(description: &str, width: u16) -> usize {
+    preview_logical_lines(
+        description.split('\n').map(|line| (line, true)),
+        width,
+        0,
+        0,
+        true,
+    )
+    .row
+}
+
 struct Page {
     width: usize,
     skip: usize,
@@ -462,6 +491,22 @@ impl Page {
 }
 
 fn preview_page(text: &str, width: u16, skip: usize, count: usize, scan_all: bool) -> Page {
+    preview_logical_lines(
+        text.split('\n').map(|line| (line, false)),
+        width,
+        skip,
+        count,
+        scan_all,
+    )
+}
+
+fn preview_logical_lines<'a>(
+    lines: impl Iterator<Item = (&'a str, bool)>,
+    width: u16,
+    skip: usize,
+    count: usize,
+    scan_all: bool,
+) -> Page {
     let mut page = Page {
         width: usize::from(width),
         skip,
@@ -473,27 +518,29 @@ fn preview_page(text: &str, width: u16, skip: usize, count: usize, scan_all: boo
         line: String::new(),
         lines: Vec::new(),
     };
-    for logical in text.split('\n') {
-        // Span filters control graphemes; separate them first so tabs and CR
-        // are represented visibly rather than being silently dropped.
-        for segment in logical.split_inclusive(char::is_control) {
+    for (logical, is_description) in lines {
+        // Split at words and controls together so a long single line is not
+        // scanned to its end before yielding the first visible word.
+        for segment in logical.split_inclusive(|c: char| c.is_whitespace() || c.is_control()) {
             let control = segment.chars().next_back().filter(|c| c.is_control());
             let normal = &segment[..segment.len() - control.map_or(0, char::len_utf8)];
-            // Prefer breaking between words; exceptionally long words still
-            // wrap by grapheme. This changes display only, not rendered bytes.
-            for word in normal.split_inclusive(char::is_whitespace) {
-                let span = Span::raw(word);
-                if page.has_token && page.used + span.width() > page.width && page.flush() {
+            let span = Span::raw(normal);
+            if page.has_token && page.used + span.width() > page.width && page.flush() {
+                return page;
+            }
+            for grapheme in span.styled_graphemes(Style::default()) {
+                if page.push(grapheme.symbol) {
                     return page;
-                }
-                for grapheme in span.styled_graphemes(Style::default()) {
-                    if page.push(grapheme.symbol) {
-                        return page;
-                    }
                 }
             }
             if let Some(control) = control {
-                let escaped = inline_text(&control.to_string());
+                let escaped = if is_description && control == '\t' {
+                    "    ".to_owned()
+                } else if is_description {
+                    format!("\\u{{{:04x}}}", control as u32)
+                } else {
+                    inline_text(&control.to_string())
+                };
                 for character in escaped.chars() {
                     if page.push(&character.to_string()) {
                         return page;
@@ -691,6 +738,56 @@ mod tests {
                 <= 120
         );
         assert!(!page.iter().any(|line| line.to_string().contains('\u{1b}')));
+    }
+
+    #[test]
+    fn description_controls_are_safe_and_tabs_display_as_four_spaces() {
+        let description = "a\tb\rc\u{1b}d";
+        let safe = super::super::safe_text(description);
+        let combined = format!("{safe}\n\npreview\nbody");
+        for width in [10, 30] {
+            let (actual, _) = detail_preview(description, "body", width, 0, 30, true);
+            let (expected, _) = counted_preview(&combined, width, 0, 30);
+            let text = |lines: Vec<Line<'static>>| {
+                lines
+                    .into_iter()
+                    .map(|line| line.to_string())
+                    .collect::<String>()
+            };
+            let actual = text(actual);
+            let expected = text(expected);
+            assert!(!actual.contains('\u{1b}'));
+            assert_eq!(
+                actual
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect::<String>(),
+                expected
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect::<String>()
+            );
+            if width == 30 {
+                assert!(actual.contains("a    b"));
+            }
+        }
+    }
+
+    #[test]
+    fn multipart_detail_matches_combined_paging_without_copying_the_body() {
+        let description = "first line café\nsecond line";
+        let body = "long body ".repeat(100_000);
+        let combined = format!("{description}\n\npreview\n{body}");
+        for width in [38, 50] {
+            for skip in [0, 3, 20] {
+                let (actual, actual_total) =
+                    detail_preview(description, &body, width, skip, 4, true);
+                let (expected, expected_total) = counted_preview(&combined, width, skip, 4);
+                assert_eq!(actual_total, expected_total);
+                assert_eq!(actual, expected);
+                assert!(actual.len() <= 4);
+            }
+        }
     }
 
     #[test]
