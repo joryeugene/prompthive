@@ -148,32 +148,40 @@ fn cargo(args: &[OsString]) -> Result<()> {
     Ok(())
 }
 
-pub fn run() -> Result<()> {
-    if cfg!(windows) {
-        bail!("update from another terminal with cargo install prompthive --locked, using the original install root and features");
-    }
-    let exe = std::env::current_exe().context(HELP)?;
-    if !fs::symlink_metadata(&exe)
+fn supported_executable(exe: &Path, cargo_home: &Path, home: &Path) -> Result<PathBuf> {
+    if !fs::symlink_metadata(exe)
         .context(HELP)?
         .file_type()
         .is_file()
     {
         bail!(HELP);
     }
+    // macOS commonly exposes the same temporary directory as /var and
+    // /private/var. Compare canonical identities for every path, rather than
+    // mixing a canonical Cargo home with an uncanonicalized executable path.
+    let exe = fs::canonicalize(exe).context(HELP)?;
     let root = exe.parent().and_then(Path::parent).context(HELP)?;
+    let cargo_home = fs::canonicalize(cargo_home).context(HELP)?;
+    let home = fs::canonicalize(home).context(HELP)?;
+    if cargo_home != root || !root.starts_with(&home) || root == home {
+        bail!(HELP);
+    }
+    Ok(exe)
+}
+
+pub fn run() -> Result<()> {
+    if cfg!(windows) {
+        bail!("update from another terminal with cargo install prompthive --locked, using the original install root and features");
+    }
     // Only an explicitly configured Cargo home or the ordinary ~/.cargo is
     // supported. An arbitrary shared --root could belong to another manager.
     let cargo_home = std::env::var_os("CARGO_HOME")
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|home| home.join(".cargo")))
         .context(HELP)?;
-    if fs::canonicalize(&cargo_home).context(HELP)? != root {
-        bail!(HELP);
-    }
-    let home = fs::canonicalize(dirs::home_dir().context(HELP)?).context(HELP)?;
-    if !root.starts_with(&home) || root == home {
-        bail!(HELP);
-    }
+    let home = dirs::home_dir().context(HELP)?;
+    let exe = supported_executable(&std::env::current_exe().context(HELP)?, &cargo_home, &home)?;
+    let root = exe.parent().and_then(Path::parent).context(HELP)?;
     let original_metadata = metadata(root)?;
     let original_tracking = tracking_file(root, ".crates.toml")?;
     let (_, args) = plan(&exe, &original_metadata)?;
@@ -323,5 +331,34 @@ mod tests {
         )
         .is_err());
         assert!(plan(Path::new("/tmp/ph"), &metadata(REGISTRY, "[]")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_and_cargo_home_accept_equivalent_parent_aliases() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        let home = real.join("home");
+        let cargo = home.join("cargo");
+        fs::create_dir_all(cargo.join("bin")).unwrap();
+        fs::write(cargo.join("bin/ph"), b"fixture").unwrap();
+        let alias = temp.path().join("alias");
+        symlink(&real, &alias).unwrap();
+        let alias_home = alias.join("home");
+        let alias_exe = alias_home.join("cargo/bin/ph");
+        assert_ne!(
+            alias_exe.parent().unwrap().parent().unwrap(),
+            fs::canonicalize(&cargo).unwrap()
+        );
+        let resolved = supported_executable(&alias_exe, &cargo, &alias_home).unwrap();
+        assert_eq!(resolved, fs::canonicalize(cargo.join("bin/ph")).unwrap());
+        let other = temp.path().join("other");
+        fs::create_dir(&other).unwrap();
+        assert!(supported_executable(&alias_exe, &cargo, &other).is_err());
+        assert!(supported_executable(&alias_exe, &other, &alias_home).is_err());
+        let linked_exe = cargo.join("bin/linked-ph");
+        symlink(cargo.join("bin/ph"), &linked_exe).unwrap();
+        assert!(supported_executable(&linked_exe, &cargo, &alias_home).is_err());
     }
 }

@@ -18,7 +18,7 @@ FAKE = r'''#!/usr/bin/python3
 import json, os, pathlib, shutil, sys
 args=sys.argv[1:]
 with open(os.environ['FAKE_LOG'],'a') as f: f.write(json.dumps(args)+'\n')
-root=pathlib.Path(args[args.index('--root')+1]); stage=root != pathlib.Path(os.environ['CARGO_HOME']); initial=stage and '--version' in args
+root=pathlib.Path(args[args.index('--root')+1]); stage=root.resolve() != pathlib.Path(os.environ['CARGO_HOME']).resolve(); initial=stage and '--version' in args
 mode=os.environ['FAKE_MODE']
 if mode=='advance' and stage and not initial:
     pathlib.Path(os.environ['FAKE_REGISTRY']).write_text('99.0.2')
@@ -59,15 +59,21 @@ else:
         (root/'.crates2.json').write_text(os.environ['FAKE_NEW_META'])
         if mode in ('failure_after','race','signal'): sys.exit(7)
 '''
-for mode in ('updated','current','mismatch','failure','false_success','wrong_source','declined','non_tty','advance','wrong_bytes','failure_after','race','signal'):
+for mode in ('updated','current','mismatch','failure','false_success','wrong_source','declined','non_tty','advance','wrong_bytes','failure_after','race','signal','alias'):
     with tempfile.TemporaryDirectory(prefix='ph-update-test-') as tmp:
-        home=pathlib.Path(tmp)/'home'; root=home/'cargo'; fake=home/'fake'; (root/'bin').mkdir(parents=True); fake.mkdir()
+        base=pathlib.Path(tmp)
+        if mode=='alias':
+            (base/'physical').mkdir()
+            (base/'alias').symlink_to(base/'physical', target_is_directory=True)
+            home=base/'alias/home'
+        else: home=base/'home'
+        root=home/'cargo'; fake=home/'fake'; (root/'bin').mkdir(parents=True); fake.mkdir()
         exe=root/'bin/ph'; shutil.copy2(binary,exe); original=exe.read_bytes()
         initial=meta(source='path+file:///local' if mode=='wrong_source' else registry)
         (root/'.crates2.json').write_text(json.dumps(initial))
         (root/'.crates.toml').write_bytes(b'[v1]\nfixture = []\n')
         cargo=fake/'cargo'; cargo.write_text(FAKE.replace('#!/usr/bin/python3', '#!'+sys.executable, 1)); cargo.chmod(0o700)
-        env=os.environ.copy(); env.update(HOME=str(home),CARGO_HOME=str(root),PATH=str(fake),FAKE_LOG=str(home/'log'),FAKE_MODE=('updated' if mode in ('declined','non_tty') else mode),FAKE_ORIGINAL=str(exe),FAKE_META=json.dumps(meta()),FAKE_NEW_META=json.dumps(meta(next_version)),FAKE_NEXT=next_version,FAKE_READY=str(home/'ready'),FAKE_GATE=str(home/'gate'),FAKE_REGISTRY=str(home/'registry'))
+        env=os.environ.copy(); env.update(HOME=str(home),CARGO_HOME=str(root),PATH=str(fake),FAKE_LOG=str(home/'log'),FAKE_MODE=('updated' if mode in ('declined','non_tty','alias') else mode),FAKE_ORIGINAL=str(exe),FAKE_META=json.dumps(meta()),FAKE_NEW_META=json.dumps(meta(next_version)),FAKE_NEXT=next_version,FAKE_READY=str(home/'ready'),FAKE_GATE=str(home/'gate'),FAKE_REGISTRY=str(home/'registry'))
         master,slave=pty.openpty()
         try:
             stdin = subprocess.DEVNULL if mode=='non_tty' else slave
@@ -91,7 +97,7 @@ for mode in ('updated','current','mismatch','failure','false_success','wrong_sou
             if slave is not None: os.close(slave)
         log=[json.loads(line) for line in (home/'log').read_text().splitlines()] if (home/'log').exists() else []
         assert result.stdout==b'',(mode,result.stdout)
-        if mode in ('updated','advance'):
+        if mode in ('updated','advance','alias'):
             assert result.returncode==0 and f'updated: ph {next_version}'.encode() in result.stderr and len(log)==3,(mode,result.stderr,log)
         elif mode=='current':
             assert result.returncode==0 and f'ph {current} is already current'.encode() in result.stderr and len(log)==2,(mode,result.stderr,log)
@@ -100,7 +106,7 @@ for mode in ('updated','current','mismatch','failure','false_success','wrong_sou
             if mode in ('mismatch','failure','wrong_source','declined','non_tty'):
                 assert exe.read_bytes()==original
             assert len(log)==(0 if mode=='wrong_source' else 1 if mode in ('mismatch','failure') else 2 if mode in ('declined','non_tty') else 3),(mode,log)
-        if mode in ('updated','advance'):
+        if mode in ('updated','advance','alias'):
             assert log[-1][log[-1].index('--version')+1] == f'={next_version}'
         if mode=='advance': assert (home/'registry').read_text()=='99.0.2'
         if mode=='race': assert exe.read_bytes()==b'external installer replacement'
