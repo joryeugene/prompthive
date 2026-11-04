@@ -1,5 +1,7 @@
 //! Ephemeral value entry followed by a frozen, safely displayed output buffer.
-use super::{poll_event, safe_text, tail_to_width, wrap_text, Screen, SMALL_TERMINAL};
+use super::{
+    display_destination, poll_event, safe_text, tail_to_width, wrap_text, Screen, SMALL_TERMINAL,
+};
 use crate::{limits, template::Variables};
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -70,7 +72,7 @@ impl Form {
             .map(|f| f.text.len())
             .try_fold(text.len(), usize::checked_add);
         if total.is_none_or(|size| size > limits::TEXT_BYTES) {
-            self.message = Some("Values are too large; nothing was truncated.".into());
+            self.message = Some("values are too large; nothing was truncated.".into());
             return;
         }
         let field = &mut self.fields[self.active];
@@ -186,7 +188,12 @@ impl Form {
         let outer = frame.area();
         if outer.width < 32 || outer.height < 14 {
             frame.render_widget(
-                Paragraph::new(wrap_text(SMALL_TERMINAL, outer.width)),
+                Paragraph::new(preview_lines(
+                    SMALL_TERMINAL,
+                    outer.width,
+                    0,
+                    outer.height as usize,
+                )),
                 outer,
             );
             return;
@@ -199,21 +206,32 @@ impl Form {
         };
         let preview = self.preview.is_some();
         let mut heading = vec![Line::from(if preview {
-            "Preview rendered prompt"
+            "preview rendered prompt"
         } else {
-            "Fill required values"
+            "fill required values"
         })
         .style(Style::default().add_modifier(Modifier::BOLD))];
         heading.extend(wrap_text(
-            &format!("Prompt: {}", safe_text(name)),
+            &format!("prompt · {}", safe_text(name)),
             area.width,
         ));
         heading.extend(wrap_text(
-            &format!("Destination: {}", safe_text(destination)),
+            &format!(
+                "destination · {}",
+                safe_text(&display_destination(destination))
+            ),
             area.width,
         ));
         if heading.len() + 7 > area.height as usize {
-            frame.render_widget(Paragraph::new(wrap_text(SMALL_TERMINAL, area.width)), area);
+            frame.render_widget(
+                Paragraph::new(preview_lines(
+                    SMALL_TERMINAL,
+                    area.width,
+                    0,
+                    area.height as usize,
+                )),
+                area,
+            );
             return;
         }
         let head_height = heading.len() as u16;
@@ -244,38 +262,56 @@ impl Form {
             }
             self.more = more;
             self.page = content.height as usize;
+            let footer_y = if more {
+                footer.y
+            } else {
+                (content.y + lines.len().min(content.height as usize) as u16 + 1).min(footer.y)
+            };
             frame.render_widget(Paragraph::new(lines), content);
             frame.render_widget(
                 Paragraph::new(vec![
                     Line::from(if area.width < 34 {
-                        "Enter use  Esc cancel"
+                        "enter use  esc cancel"
                     } else {
-                        "Enter use  Esc cancel  PgUp/PgDn"
+                        "enter use  esc cancel  pgup/pgdn"
                     }),
                     Line::from(if area.width < 34 {
-                        "PgUp/PgDn; controls escaped"
+                        "pgup/pgdn; controls escaped"
                     } else {
-                        "Controls escaped; output unchanged."
+                        "controls escaped; output unchanged."
                     }),
                 ]),
-                footer,
+                Rect {
+                    y: footer_y,
+                    ..footer
+                },
             );
             return;
         }
         let field = &self.fields[self.active];
-        let label = format!("{} ({}/{})", field.name, self.active + 1, self.fields.len());
+        let label = format!(
+            "> {} ({}/{})",
+            field.name,
+            self.active + 1,
+            self.fields.len()
+        );
         let label = wrap_text(&safe_text(&label), content.width);
         if label.len() + 2 > content.height as usize {
             self.visible = false;
             frame.render_widget(
-                Paragraph::new(wrap_text(SMALL_TERMINAL, content.width)),
+                Paragraph::new(preview_lines(
+                    SMALL_TERMINAL,
+                    content.width,
+                    0,
+                    content.height as usize,
+                )),
                 content,
             );
             return;
         }
         let label_height = label.len() as u16;
         frame.render_widget(
-            Paragraph::new(label),
+            Paragraph::new(label).style(Style::default().add_modifier(Modifier::BOLD)),
             Rect {
                 height: label_height,
                 ..content
@@ -310,32 +346,44 @@ impl Form {
             content.y + label_height,
         ));
         let message = self.message.as_deref().unwrap_or(if field.answered {
-            "Value set. Paste keeps newlines."
+            "value set. paste keeps newlines."
         } else {
-            "Unset. Enter accepts even an empty value."
+            "unset. enter accepts even an empty value."
         });
+        let message_y = content.y + label_height + 2;
+        let message_lines = preview_lines(
+            message,
+            content.width,
+            0,
+            content.height.saturating_sub(label_height + 2) as usize,
+        );
+        let footer_y =
+            (message_y + message_lines.len().min(content.height as usize) as u16 + 1).min(footer.y);
         frame.render_widget(
-            Paragraph::new(wrap_text(message, content.width)),
+            Paragraph::new(message_lines),
             Rect {
-                y: content.y + label_height + 2,
-                height: content.height.saturating_sub(label_height + 2),
+                y: message_y,
+                height: footer_y.saturating_sub(message_y),
                 ..content
             },
         );
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from(if area.width < 34 {
-                    "Tab field  Esc cancel"
+                    "tab field  esc cancel"
                 } else {
-                    "Tab/Shift-Tab field  Esc cancel"
+                    "tab/shift-tab field  esc cancel"
                 }),
                 Line::from(if area.width < 34 {
-                    "Shift-Tab back  Enter preview"
+                    "shift-tab back  enter preview"
                 } else {
-                    "Enter preview/next  Alt-Enter newline"
+                    "enter preview/next  alt-enter newline"
                 }),
             ]),
-            footer,
+            Rect {
+                y: footer_y,
+                ..footer
+            },
         );
     }
 }
@@ -431,10 +479,17 @@ fn preview_page(text: &str, width: u16, skip: usize, count: usize, scan_all: boo
         for segment in logical.split_inclusive(char::is_control) {
             let control = segment.chars().next_back().filter(|c| c.is_control());
             let normal = &segment[..segment.len() - control.map_or(0, char::len_utf8)];
-            let span = Span::raw(normal);
-            for grapheme in span.styled_graphemes(Style::default()) {
-                if page.push(grapheme.symbol) {
+            // Prefer breaking between words; exceptionally long words still
+            // wrap by grapheme. This changes display only, not rendered bytes.
+            for word in normal.split_inclusive(char::is_whitespace) {
+                let span = Span::raw(word);
+                if page.has_token && page.used + span.width() > page.width && page.flush() {
                     return page;
+                }
+                for grapheme in span.styled_graphemes(Style::default()) {
+                    if page.push(grapheme.symbol) {
+                        return page;
+                    }
                 }
             }
             if let Some(control) = control {
@@ -519,6 +574,39 @@ mod tests {
         assert_eq!(values["provided"], "default");
     }
     #[test]
+    fn app_labels_are_lowercase_without_changing_identity_or_path() {
+        let mut f = Form::new(vec!["Language".into()]);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| f.draw(frame, "Notes/MyPrompt", "Write Out/Report.TXT"))
+            .unwrap();
+        let b = terminal.backend().buffer();
+        let screen = (0..24)
+            .map(|y| (0..80).map(|x| b[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("prompt · Notes/MyPrompt"));
+        assert!(screen.contains("destination · write · Out/Report.TXT"));
+        assert!(screen.contains("Language"));
+    }
+    #[test]
+    fn narrow_field_hint_keeps_words_intact() {
+        let mut f = Form::new(vec!["lang".into()]);
+        let screen = paint(&mut f, 40, 18);
+        assert!(screen.contains("empty"));
+        assert!(screen.contains("value."));
+        let rows: Vec<_> = screen.lines().collect();
+        let hint = rows
+            .iter()
+            .position(|line| line.contains("value."))
+            .unwrap();
+        let keys = rows
+            .iter()
+            .position(|line| line.contains("tab/shift-tab"))
+            .unwrap();
+        assert!(keys > hint && keys - hint <= 2);
+    }
+    #[test]
     fn caret_edits_preserve_utf8_and_never_interpret_paste_as_keys() {
         let mut f = Form::new(vec!["value".into()]);
         f.insert("a🦀é");
@@ -534,14 +622,14 @@ mod tests {
     #[test]
     fn invisible_identity_cannot_submit_and_resize_recovers() {
         let mut f = Form::new(vec!["value".into()]);
-        assert!(paint(&mut f, 20, 6).contains("Terminal too small"));
+        assert!(paint(&mut f, 20, 6).contains("terminal too small"));
         f.insert("yes");
         assert_eq!(f.key(key(KeyCode::Enter)), Action::Continue);
         for (w, h) in [(40, 18), (80, 24), (120, 40)] {
             let s = paint(&mut f, w, h);
             assert!(f.visible);
             assert!(s.contains("notes/explain"));
-            assert!(s.contains("Esc cancel"));
+            assert!(s.contains("esc cancel"));
         }
         assert_eq!(f.key(key(KeyCode::Enter)), Action::Render);
     }
@@ -630,5 +718,22 @@ mod tests {
         let (page, _) = preview_window("a\r\nb\t", 40, 0, 4);
         assert_eq!(page[0].to_string(), "a\\u{000d}");
         assert_eq!(page[1].to_string(), "b\\t");
+    }
+
+    #[test]
+    fn preview_wraps_at_words_and_pages_without_dropping_content() {
+        let source = "Review this change for correctness and maintainability.";
+        let (lines, total) = counted_preview(source, 20, 0, 10);
+        assert_eq!(
+            lines.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            [
+                "Review this change ",
+                "for correctness and ",
+                "maintainability."
+            ]
+        );
+        assert_eq!(total, 3);
+        let page = preview_lines(source, 20, 1, 1);
+        assert_eq!(page[0].to_string(), "for correctness and ");
     }
 }

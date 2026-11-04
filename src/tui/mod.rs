@@ -14,7 +14,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::Rect,
     style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
+    text::{Line, Span},
     widgets::{List, ListItem, ListState, Paragraph},
     Frame, Terminal,
 };
@@ -44,10 +44,8 @@ pub enum PickerIntent {
     Edit,
 }
 
-const NAVIGATION: &str = "Type to find  Up/Down select  Enter use  Esc cancel";
-const COMMANDS: &str = "CLI: u use  f find  n new  e edit  c compose";
 const SMALL_TERMINAL: &str =
-    "Terminal too small for the full selection. Resize, or Esc and use an exact name.";
+    "terminal too small for the full selection. resize, or esc and use an exact name.";
 
 /// A keyboard is separate from piped prompt context.
 pub fn keyboard_available() -> bool {
@@ -70,14 +68,11 @@ pub fn keyboard_available() -> bool {
 pub fn interactive_supported() -> bool {
     io::stdout().is_terminal()
         && keyboard_available()
-        && display_supported(
-            std::env::var("TERM").ok().as_deref(),
-            std::env::var_os("NO_COLOR").is_some(),
-        )
+        && display_supported(std::env::var("TERM").ok().as_deref())
 }
 
-fn display_supported(term: Option<&str>, no_color: bool) -> bool {
-    !no_color && term.is_some_and(|term| !term.is_empty() && term != "dumb")
+fn display_supported(term: Option<&str>) -> bool {
+    term.is_some_and(|term| !term.is_empty() && term != "dumb")
 }
 
 /// Return a full canonical ID only after Enter. Escape, Ctrl-C and Unix
@@ -326,11 +321,11 @@ fn load_entries_with_budget(storage: &Storage, limit: usize) -> Result<Vec<Entry
                     .chain()
                     .find_map(|cause| cause.downcast_ref::<crate::limits::LimitError>());
                 let problem = if permissions {
-                    "Read permission is denied.".to_owned()
+                    "read permission is denied.".to_owned()
                 } else if let Some(limit) = limit {
-                    format!("Preview unavailable: {limit}. The stored file is unchanged.")
+                    format!("preview unavailable: {limit}. the stored file is unchanged.")
                 } else {
-                    "The prompt could not be read or its frontmatter is malformed.".to_owned()
+                    "the prompt could not be read or its frontmatter is malformed.".to_owned()
                 };
                 let editable = storage
                     .read_raw(&name)
@@ -340,23 +335,28 @@ fn load_entries_with_budget(storage: &Storage, limit: usize) -> Result<Vec<Entry
                     .prompt_path(&name)
                     .map(|path| path.display().to_string())
                     .unwrap_or_else(|_| storage.base_dir().display().to_string());
+                let recovery = if editable {
+                    format!(
+                        "edit with: ph e {}\ncheck its frontmatter and file permissions.",
+                        shell_selector(&name)
+                    )
+                } else {
+                    "check permissions or repair the file outside ph.".to_owned()
+                };
                 Entry {
-                        prompt: Prompt {
-                            name: name.clone(),
-                            short_code: String::new(),
-                            description: "Cannot read this prompt".into(),
-                            version: None,
-                            created_at: None,
-                            updated_at: None,
-                            git_hash: None,
-                        },
-                        body: String::new(),
-                        editable,
-                    error: Some(format!(
-                            "{problem}\nPath: {location}\nCheck its frontmatter and file permissions.\nEdit with: ph e {}",
-                            shell_selector(&name)
-                        )),
-                    }
+                    prompt: Prompt {
+                        name: name.clone(),
+                        short_code: String::new(),
+                        description: "cannot read this prompt".into(),
+                        version: None,
+                        created_at: None,
+                        updated_at: None,
+                        git_hash: None,
+                    },
+                    body: String::new(),
+                    editable,
+                    error: Some(format!("{problem}\n{recovery}\npath: {location}")),
+                }
             }
         };
         budget.add(std::mem::size_of::<Entry>())?;
@@ -466,9 +466,9 @@ impl PickerState {
                         return Decision::Use(entry.prompt.name.clone());
                     }
                     self.message = Some(if self.intent == PickerIntent::Edit {
-                        "Cannot edit this prompt safely. Check its bytes and permissions.".into()
+                        "cannot edit this prompt safely. check its bytes and permissions.".into()
                     } else {
-                        "Cannot use this prompt. Check the file shown in the preview.".into()
+                        "cannot use this prompt. check the file shown in the preview.".into()
                     });
                 }
             }
@@ -490,9 +490,11 @@ impl PickerState {
                     .preview_scroll
                     .saturating_add(self.page_height)
                     .min(self.max_scroll);
+                self.message = None;
             }
             KeyCode::PageUp => {
                 self.preview_scroll = self.preview_scroll.saturating_sub(self.page_height);
+                self.message = None;
             }
             KeyCode::Backspace => {
                 self.query.pop();
@@ -507,7 +509,7 @@ impl PickerState {
                     self.query.push(character);
                     self.refilter();
                 } else {
-                    self.message = Some("Search query is too large.".into());
+                    self.message = Some("search query is too large.".into());
                 }
             }
             _ => {}
@@ -520,110 +522,202 @@ impl PickerState {
         self.identity_visible = false;
         if outer.width < 32 || outer.height < 14 {
             frame.render_widget(
-                Paragraph::new(wrap_text(SMALL_TERMINAL, outer.width)),
+                Paragraph::new(guided::preview_lines(
+                    SMALL_TERMINAL,
+                    outer.width,
+                    0,
+                    outer.height as usize,
+                )),
                 outer,
             );
             return;
         }
         let area = Rect {
-            x: outer.x + 1,
-            y: outer.y + 1,
-            width: outer.width.saturating_sub(2),
-            height: outer.height.saturating_sub(2),
+            height: outer.height.min(12),
+            ..outer
         };
-        frame.render_widget(
-            Paragraph::new("Prompthive").style(Style::default().add_modifier(Modifier::BOLD)),
-            Rect { height: 1, ..area },
-        );
-        let prefix = if self.intent == PickerIntent::Edit {
-            "Find to edit: "
+        let prefix_text = if self.intent == PickerIntent::Edit {
+            "find to edit"
         } else {
-            "Find a prompt: "
+            "find"
         };
-        let query = tail_to_width(
-            &safe_text(&self.query),
-            area.width.saturating_sub(prefix.len() as u16 + 1),
+        let prefix = format!("{prefix_text} · ");
+        let no_color = std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty());
+        let accent = Style::default().add_modifier(Modifier::BOLD);
+        let marker = if no_color {
+            Style::default()
+        } else {
+            Style::default().fg(Color::Cyan)
+        };
+        let count = if self.filtered.len() > 3 {
+            format!(
+                "{}{}/{}",
+                "  ",
+                self.selection.selected().unwrap_or(0) + 1,
+                self.filtered.len()
+            )
+        } else {
+            String::new()
+        };
+        let available = area.width.saturating_sub(
+            (Line::from(prefix.clone()).width() + Line::from(count.clone()).width() + 1) as u16,
         );
-        let query_line = format!("{prefix}{query}");
+        let safe_query = safe_text(&self.query);
+        let query = if Line::from(safe_query.clone()).width() > available as usize && available > 0
+        {
+            format!(
+                "…{}",
+                tail_to_width(&safe_query, available.saturating_sub(1))
+            )
+        } else {
+            tail_to_width(&safe_query, available)
+        };
+        let input_line = format!("{prefix}{query}");
+        let query_line = Line::from(vec![
+            Span::styled(prefix_text, accent),
+            Span::styled(" · ", marker),
+            Span::raw(query),
+            Span::raw(if self.query.is_empty() {
+                "type to search"
+            } else {
+                ""
+            }),
+            Span::raw(count),
+        ]);
+        frame.render_widget(Paragraph::new(query_line), Rect { height: 1, ..area });
+        frame.set_cursor_position((
+            area.x
+                + Line::from(input_line)
+                    .width()
+                    .min(area.width.saturating_sub(1) as usize) as u16,
+            area.y,
+        ));
+
+        // Display the whole destination before enabling Enter; preserve path case.
+        let destination = self.destination.as_deref().map(display_destination);
+        let mut destination_lines = destination
+            .as_deref()
+            .map(|s| wrap_text(&safe_text(s), area.width))
+            .unwrap_or_default();
+        if let Some(first) = destination_lines.first_mut() {
+            let text = first.to_string();
+            if let Some((label, rest)) = text.split_once(" · ") {
+                *first = Line::from(vec![
+                    Span::styled(label.to_owned(), accent),
+                    Span::styled(" · ", marker),
+                    Span::raw(rest.to_owned()),
+                ]);
+            }
+        }
+        let footer_height = destination_lines.len().saturating_add(2);
+        let identity_height = self
+            .selected()
+            .map(|entry| {
+                let name = safe_text(&entry.prompt.name);
+                if !name.contains('\n')
+                    && Line::from(name.clone()).width() <= area.width.saturating_sub(2) as usize
+                {
+                    0
+                } else {
+                    wrap_text(&format!("id · {name}"), area.width).len()
+                }
+            })
+            .unwrap_or(1);
+        let required_height = footer_height
+            .saturating_add(identity_height)
+            .saturating_add(6);
+        let area = Rect {
+            height: outer
+                .height
+                .min((required_height.min(u16::MAX as usize) as u16).max(12)),
+            ..outer
+        };
+        if footer_height.saturating_add(7) > area.height as usize {
+            frame.render_widget(
+                Paragraph::new(guided::preview_lines(
+                    SMALL_TERMINAL,
+                    area.width,
+                    0,
+                    area.height.saturating_sub(1) as usize,
+                )),
+                Rect {
+                    y: area.y + 1,
+                    height: area.height - 1,
+                    ..area
+                },
+            );
+            return;
+        }
+        let footer_y = area.y + area.height - footer_height as u16;
+        if !destination_lines.is_empty() {
+            frame.render_widget(
+                Paragraph::new(destination_lines),
+                Rect {
+                    y: footer_y,
+                    height: (footer_height - 2) as u16,
+                    ..area
+                },
+            );
+        }
+        let blocked = self.selected().is_some_and(|entry| {
+            entry.error.is_some() && !(self.intent == PickerIntent::Edit && entry.editable)
+        });
+        let identity_hidden = self.selected().is_some()
+            && identity_height.saturating_add(5) > footer_y.saturating_sub(area.y + 1) as usize;
+        let nav = if identity_hidden {
+            "resize · esc cancel"
+        } else if self.entries.is_empty() {
+            "esc cancel"
+        } else if self.filtered.is_empty() {
+            "backspace · esc cancel"
+        } else if blocked && self.intent == PickerIntent::Edit {
+            "arrows · esc cancel · no edit"
+        } else if blocked {
+            "arrows · esc cancel · cannot use"
+        } else if self.intent == PickerIntent::Edit {
+            "arrows · enter edit · esc cancel"
+        } else {
+            "arrows · enter use · esc cancel"
+        };
         frame.render_widget(
-            Paragraph::new(query_line.clone()),
+            Paragraph::new(nav),
             Rect {
-                y: area.y + 1,
+                y: area.y + area.height - 2,
                 height: 1,
                 ..area
             },
         );
-        frame.set_cursor_position((
-            area.x
-                + Line::from(query_line)
-                    .width()
-                    .min(area.width.saturating_sub(1) as usize) as u16,
-            area.y + 1,
-        ));
-
-        let content = Rect {
-            y: area.y + 3,
-            height: area.height.saturating_sub(7),
-            ..area
-        };
-        let footer = Rect {
-            y: area.y + area.height.saturating_sub(3),
-            height: 3,
-            ..area
-        };
         frame.render_widget(
-            Paragraph::new(Text::from(vec![
-                Line::from(if self.intent == PickerIntent::Edit && area.width < 36 {
-                    "Up/Down Enter edit Esc cancel"
-                } else if self.intent == PickerIntent::Edit {
-                    "Up/Down select  Enter edit  Esc cancel"
-                } else if area.width >= 52 {
-                    NAVIGATION
-                } else if area.width < 36 {
-                    "Up/Down  Enter use  Esc cancel"
-                } else {
-                    "Up/Down select  Enter use  Esc cancel"
-                }),
-                Line::from(if self.intent == PickerIntent::Edit {
-                    "Enter opens EDITOR; nothing copied".to_owned()
-                } else if let Some(destination) = &self.destination {
-                    format!("{}; PgUp/PgDn preview", safe_text(destination))
-                } else {
-                    "PgUp/PgDn preview".to_owned()
-                }),
-                Line::from(if area.width >= 44 {
-                    COMMANDS
-                } else {
-                    "CLI: ph --help"
-                })
-                .style(Style::default().fg(Color::DarkGray)),
-            ])),
-            footer,
+            Paragraph::new("ph --help"),
+            Rect {
+                y: area.y + area.height - 1,
+                height: 1,
+                ..area
+            },
         );
-
+        let content = Rect {
+            y: area.y + 1,
+            height: footer_y.saturating_sub(area.y + 1),
+            ..area
+        };
         if self.entries.is_empty() {
-            frame.render_widget(
-                Paragraph::new(wrap_text(
-                    "No saved prompts yet.\nSave one from the shell:\nph n review \"Review this: {input}\"\nEsc returns to the shell.",
-                    content.width,
-                )),
-                content,
-            );
+            frame.render_widget(Paragraph::new(wrap_text("no saved prompts yet.\ncreate one: ph n review \"Review this: {input}\"\nesc returns to the shell.", content.width)), content);
             self.identity_visible = true;
             return;
         }
         if self.filtered.is_empty() {
             frame.render_widget(
-                Paragraph::new(wrap_text(
-                    "No prompts match. Keep typing, Backspace, or Esc to cancel.",
+                Paragraph::new(guided::preview_lines(
+                    "no prompts match. keep typing, backspace, or esc to cancel.",
                     content.width,
+                    0,
+                    content.height as usize,
                 )),
                 content,
             );
             self.identity_visible = true;
             return;
         }
-
         let Some(index) = self
             .selection
             .selected()
@@ -633,72 +727,67 @@ impl PickerState {
             return;
         };
         let selected = &self.entries[index];
-        let command = if self.intent == PickerIntent::Edit {
-            format!("Edit with: ph e {}", shell_selector(&selected.prompt.name))
+        let name = safe_text(&selected.prompt.name);
+        let identity = if !name.contains('\n')
+            && Line::from(name.clone()).width() <= content.width.saturating_sub(2) as usize
+        {
+            Vec::new()
         } else {
-            format!("Use again: ph u {}", shell_selector(&selected.prompt.name))
+            wrap_text(&format!("id · {name}"), content.width)
         };
-        let identity = wrap_text(&safe_text(&command), content.width);
         let identity_height = identity.len();
-        if identity_height.saturating_add(4) > content.height as usize {
+        if identity_height.saturating_add(5) > content.height as usize {
             frame.render_widget(
-                Paragraph::new(wrap_text(SMALL_TERMINAL, content.width)),
+                Paragraph::new(guided::preview_lines(
+                    SMALL_TERMINAL,
+                    content.width,
+                    0,
+                    content.height as usize,
+                )),
                 content,
             );
             return;
         }
         self.identity_visible = true;
         let list_height = (content.height as usize)
-            .saturating_sub(identity_height + 3)
-            .clamp(1, 6) as u16;
+            .saturating_sub(identity_height + 4)
+            .clamp(1, 3)
+            .min(self.filtered.len()) as u16;
         let list_area = Rect {
             height: list_height,
             ..content
         };
-        let items = self.filtered.iter().map(|&index| {
-            let entry = &self.entries[index];
-            ListItem::new(format!(
-                "{}  {}",
-                safe_text(&entry.prompt.name),
-                safe_text(&entry.prompt.description.replace('\n', " "))
-            ))
-        });
+        let items = self
+            .filtered
+            .iter()
+            .map(|&index| ListItem::new(safe_text(&self.entries[index].prompt.name)));
         frame.render_stateful_widget(
             List::new(items).highlight_symbol("> ").highlight_style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED),
             ),
             list_area,
             &mut self.selection,
         );
         let identity_area = Rect {
-            y: list_area.y + list_height + 1,
+            y: list_area.y + list_height,
             height: identity_height as u16,
             ..content
         };
         frame.render_widget(Paragraph::new(identity), identity_area);
         let label_area = Rect {
-            y: identity_area.y + identity_area.height,
+            y: identity_area.y + identity_area.height + 1,
             height: 1,
-            ..content
+            x: content.x + 2,
+            width: content.width.saturating_sub(2),
         };
-        frame.render_widget(
-            Paragraph::new(if selected.error.is_some() {
-                "Cannot read prompt"
-            } else {
-                "Preview"
-            })
-            .style(Style::default().add_modifier(Modifier::BOLD)),
-            label_area,
-        );
         let body_area = Rect {
             y: label_area.y + 1,
+            x: content.x + 2,
+            width: content.width.saturating_sub(2),
             height: content
                 .y
                 .saturating_add(content.height)
                 .saturating_sub(label_area.y + 1),
-            ..content
         };
         let preview = selected.error.as_deref().unwrap_or(&selected.body);
         self.page_height = (body_area.height as usize).max(1);
@@ -722,6 +811,26 @@ impl PickerState {
             }
         };
         self.max_scroll = total.saturating_sub(body_area.height as usize);
+        let blocked = self.message.as_deref().is_some_and(|message| {
+            message.starts_with("cannot use this prompt.")
+                || message.starts_with("cannot edit this prompt")
+        });
+        let label = match (
+            blocked,
+            self.intent,
+            selected.error.is_some(),
+            self.max_scroll > 0,
+        ) {
+            (true, PickerIntent::Edit, _, true) => "cannot edit · pgup/pgdn",
+            (true, PickerIntent::Edit, _, false) => "cannot edit · see details",
+            (true, _, _, true) => "cannot use · pgup/pgdn",
+            (true, _, _, false) => "cannot use · see details",
+            (false, _, true, true) => "cannot read prompt · pgup/pgdn",
+            (false, _, true, false) => "cannot read prompt",
+            (false, _, false, true) => "preview · pgup/pgdn",
+            (false, _, false, false) => "preview",
+        };
+        frame.render_widget(Paragraph::new(label).style(accent), label_area);
         let scroll = self.preview_scroll.min(self.max_scroll);
         if scroll != self.preview_scroll {
             lines = None;
@@ -730,17 +839,19 @@ impl PickerState {
         let lines = lines.unwrap_or_else(|| {
             guided::preview_lines(preview, body_area.width, scroll, self.page_height)
         });
-        frame.render_widget(Paragraph::new(lines), body_area);
-        if let Some(message) = &self.message {
+        if let Some(message) = self.message.as_ref().filter(|_| !blocked) {
             frame.render_widget(
-                Paragraph::new(tail_to_width(message, footer.width))
-                    .style(Style::default().fg(Color::Red)),
-                Rect {
-                    y: footer.y + 1,
-                    height: 1,
-                    ..footer
-                },
+                Paragraph::new(guided::preview_lines(
+                    message,
+                    body_area.width,
+                    0,
+                    body_area.height as usize,
+                ))
+                .style(Style::default().add_modifier(Modifier::BOLD)),
+                body_area,
             );
+        } else {
+            frame.render_widget(Paragraph::new(lines), body_area);
         }
     }
 }
@@ -759,6 +870,16 @@ fn shell_selector(name: &str) -> String {
         format!("-- {quoted}")
     } else {
         quoted
+    }
+}
+
+fn display_destination(destination: &str) -> String {
+    if let Some(path) = destination.strip_prefix("Write ") {
+        format!("write · {path}")
+    } else if let Some(rest) = destination.strip_prefix("Copy to clipboard") {
+        format!("copy · clipboard{rest}")
+    } else {
+        destination.to_owned()
     }
 }
 
@@ -890,6 +1011,7 @@ mod tests {
         let error = entries[0].error.as_deref().unwrap();
         assert!(error.contains("malformed"));
         assert!(error.contains("ph e broken"));
+        assert!(error.find("ph e broken").unwrap() < error.find("path:").unwrap());
         assert!(!error.contains("private-malformed-source"));
         assert!(!error.contains("private-body"));
         assert!(entries[0].body.is_empty());
@@ -936,7 +1058,7 @@ mod tests {
             Decision::Continue
         );
         let after = painted(&mut state, 80, 24);
-        assert!(after.contains("Use again: ph u second/review"));
+        assert!(after.contains("> second/review"));
         assert!(after.contains("SECOND BODY"));
         assert!(!after.contains("FIRST BODY"));
         assert_eq!(
@@ -962,8 +1084,10 @@ mod tests {
     fn no_matches_keep_query_and_enter_has_no_effect() {
         let mut state = PickerState::new(vec![entry("review", "Untouched")], "zzzz");
         let screen = painted(&mut state, 80, 24);
-        assert!(screen.contains("Find a prompt: zzzz"));
-        assert!(screen.contains("No prompts match"));
+        assert!(screen.contains("find · zzzz"));
+        assert!(screen.contains("no prompts match"));
+        assert!(!screen.contains("enter use"));
+        assert!(screen.contains("backspace · esc cancel"));
         assert_eq!(
             state.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Decision::Continue
@@ -972,10 +1096,33 @@ mod tests {
     }
 
     #[test]
+    fn short_list_signals_more_results_and_updates_position() {
+        let entries = ["alpha", "bravo", "charlie", "delta"]
+            .into_iter()
+            .map(|name| entry(name, "Body"))
+            .collect();
+        let mut state = PickerState::new(entries, "");
+        let screen = painted(&mut state, 40, 18);
+        assert!(screen.contains("find · type to search  1/4"));
+        state.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let screen = painted(&mut state, 40, 18);
+        assert!(screen.contains("find · type to search  2/4"));
+    }
+
+    #[test]
+    fn clipped_query_is_signalled_without_changing_its_value() {
+        let query = "the-real-query-is-much-longer-than-this-terminal-can-display";
+        let mut state = PickerState::new(vec![entry("review", "Body")], query);
+        let screen = painted(&mut state, 32, 18);
+        assert!(screen.contains("find · …"));
+        assert_eq!(state.query, query);
+    }
+
+    #[test]
     fn empty_library_shows_one_clear_creation_path() {
         let mut state = PickerState::new(Vec::new(), "");
         let screen = painted(&mut state, 80, 24);
-        assert!(screen.contains("No saved prompts yet."));
+        assert!(screen.contains("no saved prompts yet."));
         assert!(screen.contains("ph n review"));
         assert!(!screen.contains("registry"));
         assert_eq!(
@@ -993,16 +1140,37 @@ mod tests {
             "broken",
         );
         let screen = painted(&mut state, 80, 24);
-        assert!(screen.contains("Cannot read prompt"));
+        assert!(screen.contains("cannot read prompt"));
         assert!(screen.contains("/synthetic/notes/broken.md"));
+        assert!(!screen.contains("enter use"));
+        assert!(screen.contains("cannot use"));
         assert_eq!(
             state.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Decision::Continue
         );
         let blocked = painted(&mut state, 80, 24);
-        assert!(blocked.contains("Cannot use this prompt."));
-        assert!(blocked.contains("Esc cancel"));
-        assert!(blocked.contains(COMMANDS));
+        assert!(blocked.contains("cannot use ·"));
+        assert!(blocked.contains("esc"));
+        assert!(blocked.contains("ph --help"));
+    }
+
+    #[test]
+    fn blocked_error_does_not_blend_with_preview_and_paging_recovers_details() {
+        let mut broken = entry("broken", "");
+        broken.error = Some("The prompt could not be read or its frontmatter is malformed.\nPath: /some/long/example/broken.md\nCheck permissions and repair the source file.".into());
+        let mut state = PickerState::new(vec![broken], "broken");
+        painted(&mut state, 40, 18);
+        assert_eq!(
+            state.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Decision::Continue
+        );
+        let blocked = painted(&mut state, 40, 18);
+        assert!(blocked.contains("cannot use ·"));
+        assert!(blocked.contains("frontmatter is malformed."));
+        state.key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        let paged = painted(&mut state, 40, 18);
+        assert!(!paged.contains("cannot use · pgup/pgdn"));
+        assert!(paged.contains("permissions"));
     }
 
     #[test]
@@ -1015,15 +1183,73 @@ mod tests {
             assert!(screen.contains("VISIBLE PREVIEW"), "{width}x{height}");
             let without_padding: String = screen.lines().map(str::trim).collect();
             assert!(without_padding.contains(&name), "{width}x{height}");
-            assert!(screen.contains("Esc cancel"), "{width}x{height}");
+            assert!(screen.contains("esc"), "{width}x{height}");
         }
+    }
+
+    #[test]
+    fn near_identical_long_unicode_names_cannot_be_silently_confused() {
+        let first = format!("notes/{}/α", "résumé-".repeat(5));
+        let second = format!("notes/{}/β", "résumé-".repeat(5));
+        let mut state = PickerState::new(
+            vec![entry(&first, "FIRST"), entry(&second, "SECOND")],
+            "résumé",
+        );
+        painted(&mut state, 32, 18);
+        state.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let screen = painted(&mut state, 32, 18);
+        if state.identity_visible {
+            let compact: String = screen.lines().map(str::trim).collect();
+            assert!(compact.contains(&second));
+            assert_eq!(
+                state.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                Decision::Use(second)
+            );
+        } else {
+            assert!(screen.contains("terminal too small"));
+            assert_eq!(
+                state.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                Decision::Continue
+            );
+        }
+    }
+
+    #[test]
+    fn oversized_identity_recovers_after_terminal_is_enlarged() {
+        let name = format!(
+            "{}/second",
+            ["commonxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; 8].join("/")
+        );
+        let mut state = PickerState::new(vec![entry(&name, "SECOND")], "common");
+        let narrow = painted(&mut state, 32, 18);
+        assert!(!state.identity_visible);
+        assert!(narrow.contains("terminal too small"));
+        assert!(narrow.contains("use an exact name."));
+        assert!(narrow.contains("resize · esc cancel"));
+        assert!(!narrow.contains("enter use"));
+        assert_eq!(
+            state.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Decision::Continue
+        );
+        let wide = painted(&mut state, 120, 40);
+        assert!(state.identity_visible);
+        assert!(wide.contains("enter use"));
+        assert!(wide
+            .lines()
+            .map(str::trim)
+            .collect::<String>()
+            .contains(&name));
+        assert_eq!(
+            state.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Decision::Use(name)
+        );
     }
 
     #[test]
     fn tiny_terminal_cannot_accept_hidden_identity() {
         let mut state = PickerState::new(vec![entry("notes/review", "Body")], "");
         let screen = painted(&mut state, 20, 6);
-        assert!(screen.contains("Terminal too small"));
+        assert!(screen.contains("terminal too small"));
         assert_eq!(
             state.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Decision::Continue
@@ -1070,11 +1296,10 @@ mod tests {
     }
 
     #[test]
-    fn plain_terminal_and_no_color_have_an_explicit_non_ansi_path() {
-        assert!(!display_supported(Some("dumb"), false));
-        assert!(!display_supported(None, false));
-        assert!(!display_supported(Some("xterm-256color"), true));
-        assert!(display_supported(Some("xterm-256color"), false));
+    fn terminal_capability_is_independent_of_color_preference() {
+        assert!(!display_supported(Some("dumb")));
+        assert!(!display_supported(None));
+        assert!(display_supported(Some("xterm-256color")));
     }
 
     #[test]
@@ -1083,9 +1308,26 @@ mod tests {
             let mut state = PickerState::new(vec![entry("review", "Body")], "");
             state.destination = Some("Write result.txt".into());
             let screen = painted(&mut state, width, height);
-            assert!(screen.contains("Write result.txt"));
+            assert!(screen.contains("write · result.txt"));
             assert!(!screen.contains("Default: copy"));
         }
+    }
+
+    #[test]
+    fn mixed_case_destination_is_complete_or_selection_is_blocked() {
+        let path = format!("Reports/{}/Final.TXT", "LongPart".repeat(10));
+        let mut state = PickerState::new(vec![entry("review", "Body")], "");
+        state.destination = Some(format!("Write {path}"));
+        let screen = painted(&mut state, 40, 18);
+        let compact: String = screen.lines().map(str::trim).collect();
+        assert!(state.identity_visible && compact.contains(&path));
+        state.destination = Some(format!("Write {}", "LongPart".repeat(300)));
+        painted(&mut state, 40, 18);
+        assert!(!state.identity_visible);
+        assert_eq!(
+            state.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Decision::Continue
+        );
     }
 
     #[test]
@@ -1096,13 +1338,13 @@ mod tests {
         state.intent = PickerIntent::Edit;
         for (width, height) in [(32, 18), (40, 18), (80, 24), (120, 40)] {
             let screen = painted(&mut state, width, height);
-            assert!(screen.contains("Enter edit"));
-            assert!(screen.contains("Esc cancel"));
+            assert!(screen.contains("enter edit"));
+            assert!(screen.contains("esc"));
             assert!(screen
                 .lines()
                 .map(str::trim)
                 .collect::<String>()
-                .contains("Edit with: ph e notes/broken"));
+                .contains("> notes/broken"));
         }
         assert_eq!(
             state.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -1139,6 +1381,15 @@ mod tests {
                 .unwrap()
                 .editable
         );
+        let binary_error = entries
+            .iter()
+            .find(|e| e.prompt.name == "binary")
+            .unwrap()
+            .error
+            .as_deref()
+            .unwrap();
+        assert!(binary_error.contains("repair the file outside ph"));
+        assert!(!binary_error.contains("ph e binary"));
         let mut state = PickerState::new(entries, "binary");
         state.intent = PickerIntent::Edit;
         painted(&mut state, 80, 24);

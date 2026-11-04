@@ -165,7 +165,7 @@ def cancellation_case(binary, bash, timeout, key):
             while child.poll() is None and time.monotonic() < deadline:
                 if select.select([master], [], [], .05)[0]:
                     output.extend(os.read(master, 65536))
-                if not sent and b'Preview' in output:
+                if not sent and b'preview' in output:
                     os.write(master, key)
                     sent = True
             if child.poll() is None:

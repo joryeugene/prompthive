@@ -9,6 +9,7 @@ P = argparse.ArgumentParser(description=__doc__)
 P.add_argument('binary', type=pathlib.Path)
 P.add_argument('--report', type=pathlib.Path)
 P.add_argument('--capture-dir', type=pathlib.Path)
+P.add_argument('--no-color', action='store_true')
 P.add_argument('--case', action='append', default=[])
 A = P.parse_args()
 BINARY = A.binary.resolve(strict=True)
@@ -47,6 +48,7 @@ def case(name):
             XDG_CACHE_HOME=str(root/'cache'),XDG_RUNTIME_DIR=str(root/'runtime'),
             EDITOR=shlex.quote(sys.executable)+' '+shlex.quote(str(helper))+' '+editor_mode)
         for k in ['DISPLAY','WAYLAND_DISPLAY','NO_COLOR','BASH_ENV','ENV','PROMPTHIVE_QA_MISSING_ENV_0V4']: env.pop(k,None)
+        if A.no_color: env['NO_COLOR']='1'
         width,height=(40,18) if name in ['guided_narrow','long_identity'] else (120,40) if name=='guided_wide' else (80,24)
         master,slave=pty.openpty(); fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',height,width,0,0))
         before_modes=terminal_modes(slave); before=hashes(store); screen=VtScreen(width,height); raw=bytearray(); frames=[]; events=[]
@@ -95,14 +97,27 @@ def case(name):
             raise AssertionError('timeout waiting for '+text+'; '+screen.text())
         def key(value):events.append(value.hex());os.write(master,value)
         def capture(label):
-            frames.append({'label':label,'text':screen.text(),'width':screen.columns,'height':screen.rows})
+            frames.append({'label':label,'text':screen.text(),'width':screen.columns,'height':screen.rows,'raw_offset':len(raw)})
         failure=None; after_modes=None; actual=None
         try:
             if not name.startswith('new_') and name!='direct_missing':
-                wait('Find');capture('picker');key(query.encode()+b'\r')
+                wait('find');capture('picker')
+                if name=='long_identity':
+                    key(query.encode())
+                    deadline=time.monotonic()+8
+                    while time.monotonic()<deadline:
+                        drain()
+                        if long_name in screen.text().replace('\n','').replace(' ',''):
+                            time.sleep(.03)
+                            while select.select([master],[],[],0)[0]:drain(0)
+                            break
+                        if child.poll() is not None:raise AssertionError('exited before showing full long identity')
+                    assert long_name in screen.text().replace('\n','').replace(' ',''),'full selected identity was not visible before Enter'
+                    capture('long-identity-selected');key(b'\r')
+                else:key(query.encode()+b'\r')
                 if name in ['edit_search','edit_repair','supplied_fast','plain_fast','default_fast']:pass
                 else:
-                    wait('Fill required values');capture('fields')
+                    wait('fill required values');capture('fields')
                     if name=='cancel_fields':key(b'\x1b')
                     elif name=='ctrl_c':key(b'\x03')
                     elif name=='sigterm':child.send_signal(signal.SIGTERM)
@@ -113,12 +128,12 @@ def case(name):
                         elif name=='one_supplied':key(b'brief\r')
                         elif name=='with_directives':key(b'Rust\tsafe\tbrief\r')
                         else:key(b'Rust\tbrief\r')
-                        if name!='render_failure':wait('Preview rendered prompt');capture('rendered')
+                        if name!='render_failure':wait('preview rendered prompt');capture('rendered')
                         if name=='long_identity':assert long_name in screen.text().replace('\n','').replace(' ','')
                         if name=='render_failure':pass
                         elif name in ['cancel_preview','bare_preview_cancel','t_preview_cancel']:key(b'\x1b')
                         elif name=='resize':
-                            screen.resize(40,18);fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',18,40,0,0));child.send_signal(signal.SIGWINCH);wait('Preview rendered prompt');capture('resized');key(b'\r')
+                            screen.resize(40,18);fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',18,40,0,0));child.send_signal(signal.SIGWINCH);wait('preview rendered prompt');capture('resized');key(b'\r')
                         elif name=='tiny_blocked':
                             screen.resize(24,8);fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',8,24,0,0));child.send_signal(signal.SIGWINCH);wait('too small');key(b'\r');time.sleep(.1);drain(0);assert child.poll() is None and not (root/'result.txt').exists();key(b'\x1b');expected_code=130
                         else:key(b'\r')
@@ -150,7 +165,7 @@ def case(name):
                     uuid=re.search(rb'SNAP=([0-9a-f-]{36})',actual).group(1).decode();shown=next(f['text'] for f in frames if f['label']=='rendered').replace('\n','').replace(' ','');assert uuid in shown;assert actual.endswith(b'\nVALUE=Rust')
                 else:assert actual==expected,(actual,expected)
                 assert hashes(store)==before,'rendering changed saved prompts'
-            if name in ['plain_fast','supplied_fast','default_fast']:assert b'Fill required values' not in raw and b'Preview rendered prompt' not in raw
+            if name in ['plain_fast','supplied_fast','default_fast']:assert b'fill required values' not in raw and b'preview rendered prompt' not in raw
         except Exception as error:failure=repr(error)
         finally:
             if after_modes is None:
