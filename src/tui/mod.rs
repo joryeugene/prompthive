@@ -42,6 +42,7 @@ type Screen = Terminal<CrosstermBackend<Box<dyn Write>>>;
 pub enum PickerIntent {
     Use,
     Edit,
+    Browse,
 }
 
 const SMALL_TERMINAL: &str =
@@ -91,7 +92,7 @@ pub fn pick_prompt_for(
         query,
         intent,
         |_| None,
-        |name, _, _| Ok(Some(name.to_owned())),
+        |name, _, _, _| Ok(Some(name.to_owned())),
     )
 }
 
@@ -115,7 +116,7 @@ where
         query,
         PickerIntent::Use,
         |name| Some(destination(name)),
-        |name, terminal, interrupted| {
+        |name, _, terminal, interrupted| {
             let required = missing(name, supplied)?;
             if required.is_empty() {
                 return Ok(Some((name.to_owned(), render(name, supplied)?)));
@@ -139,7 +140,7 @@ fn pick_with<T>(
     query: &str,
     intent: PickerIntent,
     destination: impl Fn(&str) -> Option<String>,
-    selected: impl FnOnce(&str, &mut Screen, &Arc<AtomicBool>) -> Result<Option<T>>,
+    selected: impl FnOnce(&str, Action, &mut Screen, &Arc<AtomicBool>) -> Result<Option<T>>,
 ) -> Result<Option<T>> {
     if !interactive_supported() {
         bail!("Interactive preview is unavailable here. Use ph f QUERY, then ph u FULL_NAME.");
@@ -162,7 +163,9 @@ fn pick_with<T>(
         terminal.draw(|frame| state.draw(frame))?;
         match poll_event(&interrupted)? {
             Some(Event::Key(key)) => match state.key(key) {
-                Decision::Use(name) => return selected(&name, &mut terminal, &interrupted),
+                Decision::Use(name) => {
+                    return selected(&name, state.action, &mut terminal, &interrupted)
+                }
                 Decision::Cancel => return Ok(None),
                 Decision::Continue => {}
             },
@@ -171,7 +174,11 @@ fn pick_with<T>(
                     crate::limits::exceeded("search query", crate::limits::TEXT_BYTES)
                 })?;
                 crate::limits::check_len(total, crate::limits::TEXT_BYTES, "search query")?;
-                state.query.extend(text.chars().filter(|c| !c.is_control()));
+                let text: String = text.chars().filter(|c| !c.is_control()).collect();
+                state.query.insert_str(state.cursor, &text);
+                state.cursor += text.len();
+                state.action_focus = false;
+                state.action = Action::Use;
                 state.refilter();
             }
             _ => {}
@@ -369,6 +376,62 @@ fn load_entries_with_budget(storage: &Storage, limit: usize) -> Result<Vec<Entry
     Ok(entries)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Action {
+    Use,
+    Show,
+    Edit,
+}
+
+pub enum BareSelection {
+    Use(String, String),
+    Show(String),
+    Edit(String),
+}
+
+pub fn pick_bare(storage: &Storage, input: &str) -> Result<Option<BareSelection>> {
+    let composer = crate::Composer::new(storage.clone());
+    let supplied = Variables::default();
+    let destination = |name: &str| crate::IoOptions::default().confirmation(name);
+    pick_with(
+        storage,
+        "",
+        PickerIntent::Browse,
+        |name| Some(destination(name)),
+        |name, action, terminal, interrupted| match action {
+            Action::Show => Ok(Some(BareSelection::Show(name.to_owned()))),
+            Action::Edit => Ok(Some(BareSelection::Edit(name.to_owned()))),
+            Action::Use => {
+                let names = vec![name.to_owned()];
+                let required = composer
+                    .required_variables(&names, &supplied)
+                    .map_err(|error| crate::commands::common::fail(2, format!("{error:#}")))?;
+                let render = |values: &Variables| {
+                    composer
+                        .render(&names, input, values)
+                        .map_err(|error| crate::commands::common::fail(2, format!("{error:#}")))
+                };
+                if required.is_empty() {
+                    return Ok(Some(BareSelection::Use(
+                        name.to_owned(),
+                        render(&supplied)?,
+                    )));
+                }
+                guided::complete(
+                    terminal,
+                    interrupted,
+                    name,
+                    &destination(name),
+                    required,
+                    &supplied,
+                    render,
+                )
+                .map(|result| result.map(|text| BareSelection::Use(name.to_owned(), text)))
+            }
+        },
+    )
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum Decision {
     Continue,
@@ -382,6 +445,9 @@ struct PickerState {
     entries: Vec<Entry>,
     filtered: Vec<usize>,
     query: String,
+    cursor: usize,
+    action_focus: bool,
+    action: Action,
     selection: ListState,
     preview_scroll: usize,
     max_scroll: usize,
@@ -399,6 +465,9 @@ impl PickerState {
             entries,
             filtered: Vec::new(),
             query: query.chars().filter(|c| !c.is_control()).collect(),
+            cursor: 0,
+            action_focus: false,
+            action: Action::Use,
             selection: ListState::default(),
             preview_scroll: 0,
             max_scroll: 0,
@@ -407,6 +476,7 @@ impl PickerState {
             identity_visible: false,
             message: None,
         };
+        state.cursor = state.query.len();
         state.refilter();
         state
     }
@@ -454,6 +524,25 @@ impl PickerState {
         {
             return Decision::Cancel;
         }
+        if self.intent == PickerIntent::Browse && key.code == KeyCode::Tab {
+            self.action_focus = !self.action_focus;
+            if !self.action_focus {
+                self.action = Action::Use;
+            }
+            return Decision::Continue;
+        }
+        if self.intent == PickerIntent::Browse
+            && self.action_focus
+            && matches!(key.code, KeyCode::Left | KeyCode::Right)
+        {
+            self.action = match (self.action, key.code) {
+                (Action::Use, KeyCode::Right) | (Action::Edit, KeyCode::Left) => Action::Show,
+                (Action::Show, KeyCode::Right) => Action::Edit,
+                (Action::Show, KeyCode::Left) => Action::Use,
+                (action, _) => action,
+            };
+            return Decision::Continue;
+        }
         match key.code {
             KeyCode::Enter if !self.identity_visible => {
                 self.message = Some(SMALL_TERMINAL.into());
@@ -461,15 +550,23 @@ impl PickerState {
             KeyCode::Enter => {
                 if let Some(entry) = self.selected() {
                     if entry.error.is_none()
-                        || (self.intent == PickerIntent::Edit && entry.editable)
+                        || ((self.intent == PickerIntent::Edit
+                            || (self.intent == PickerIntent::Browse
+                                && self.action == Action::Edit))
+                            && entry.editable)
                     {
                         return Decision::Use(entry.prompt.name.clone());
                     }
-                    self.message = Some(if self.intent == PickerIntent::Edit {
-                        "cannot edit this prompt safely. check its bytes and permissions.".into()
-                    } else {
-                        "cannot use this prompt. check the file shown in the preview.".into()
-                    });
+                    self.message = Some(
+                        if self.intent == PickerIntent::Edit
+                            || (self.intent == PickerIntent::Browse && self.action == Action::Edit)
+                        {
+                            "cannot edit this prompt safely. check its bytes and permissions."
+                                .into()
+                        } else {
+                            "cannot use this prompt. check the file shown in the preview.".into()
+                        },
+                    );
                 }
             }
             KeyCode::Up | KeyCode::Down => {
@@ -496,9 +593,40 @@ impl PickerState {
                 self.preview_scroll = self.preview_scroll.saturating_sub(self.page_height);
                 self.message = None;
             }
+            KeyCode::Left => {
+                self.cursor = self.query[..self.cursor]
+                    .char_indices()
+                    .next_back()
+                    .map_or(0, |(i, _)| i);
+            }
+            KeyCode::Right => {
+                self.cursor += self.query[self.cursor..]
+                    .chars()
+                    .next()
+                    .map_or(0, char::len_utf8);
+            }
+            KeyCode::Home => self.cursor = 0,
+            KeyCode::End => self.cursor = self.query.len(),
             KeyCode::Backspace => {
-                self.query.pop();
-                self.refilter();
+                if self.cursor > 0 {
+                    let start = self.query[..self.cursor]
+                        .char_indices()
+                        .next_back()
+                        .map_or(0, |(i, _)| i);
+                    self.query.drain(start..self.cursor);
+                    self.cursor = start;
+                    self.action = Action::Use;
+                    self.action_focus = false;
+                    self.refilter();
+                }
+            }
+            KeyCode::Delete => {
+                if let Some(ch) = self.query[self.cursor..].chars().next() {
+                    self.query.drain(self.cursor..self.cursor + ch.len_utf8());
+                    self.action = Action::Use;
+                    self.action_focus = false;
+                    self.refilter();
+                }
             }
             KeyCode::Char(character)
                 if !key.modifiers.contains(KeyModifiers::CONTROL) && !character.is_control() =>
@@ -506,7 +634,10 @@ impl PickerState {
                 if self.query.len().saturating_add(character.len_utf8())
                     <= crate::limits::TEXT_BYTES
                 {
-                    self.query.push(character);
+                    self.query.insert(self.cursor, character);
+                    self.cursor += character.len_utf8();
+                    self.action = Action::Use;
+                    self.action_focus = false;
                     self.refilter();
                 } else {
                     self.message = Some("search query is too large.".into());
@@ -562,17 +693,24 @@ impl PickerState {
         let available = area.width.saturating_sub(
             (Line::from(prefix.clone()).width() + Line::from(count.clone()).width() + 1) as u16,
         );
-        let safe_query = safe_text(&self.query);
-        let query = if Line::from(safe_query.clone()).width() > available as usize && available > 0
-        {
-            format!(
-                "…{}",
-                tail_to_width(&safe_query, available.saturating_sub(1))
-            )
-        } else {
-            tail_to_width(&safe_query, available)
-        };
-        let input_line = format!("{prefix}{query}");
+        let before = safe_text(&self.query[..self.cursor]);
+        let after = safe_text(&self.query[self.cursor..]);
+        let mut shown_before = tail_to_width(&before, available.saturating_sub(1));
+        if shown_before != before && available > 1 {
+            shown_before = format!("…{}", tail_to_width(&before, available.saturating_sub(2)));
+        }
+        let remaining = available.saturating_sub(Line::from(shown_before.clone()).width() as u16);
+        let mut shown_after = String::new();
+        for ch in after.chars() {
+            let mut next = shown_after.clone();
+            next.push(ch);
+            if Line::from(next.clone()).width() > remaining as usize {
+                break;
+            }
+            shown_after = next;
+        }
+        let input_line = format!("{prefix}{shown_before}");
+        let query = format!("{shown_before}{shown_after}");
         let query_line = Line::from(vec![
             Span::styled(prefix_text, accent),
             Span::styled(" · ", marker),
@@ -585,16 +723,26 @@ impl PickerState {
             Span::raw(count),
         ]);
         frame.render_widget(Paragraph::new(query_line), Rect { height: 1, ..area });
-        frame.set_cursor_position((
-            area.x
-                + Line::from(input_line)
-                    .width()
-                    .min(area.width.saturating_sub(1) as usize) as u16,
-            area.y,
-        ));
+        if !self.action_focus {
+            frame.set_cursor_position((
+                area.x
+                    + Line::from(input_line)
+                        .width()
+                        .min(area.width.saturating_sub(1) as usize) as u16,
+                area.y,
+            ));
+        }
 
         // Display the whole destination before enabling Enter; preserve path case.
-        let destination = self.destination.as_deref().map(display_destination);
+        let destination = if self.intent == PickerIntent::Browse && self.action != Action::Use {
+            self.selected().map(|entry| match self.action {
+                Action::Show => format!("show · raw {}", entry.prompt.name),
+                Action::Edit => format!("edit · saved {}", entry.prompt.name),
+                Action::Use => unreachable!(),
+            })
+        } else {
+            self.destination.as_deref().map(display_destination)
+        };
         let mut destination_lines = destination
             .as_deref()
             .map(|s| wrap_text(&safe_text(s), area.width))
@@ -660,22 +808,35 @@ impl PickerState {
             );
         }
         let blocked = self.selected().is_some_and(|entry| {
-            entry.error.is_some() && !(self.intent == PickerIntent::Edit && entry.editable)
+            entry.error.is_some()
+                && !((self.intent == PickerIntent::Edit
+                    || (self.intent == PickerIntent::Browse && self.action == Action::Edit))
+                    && entry.editable)
         });
         let identity_hidden = self.selected().is_some()
             && identity_height.saturating_add(5) > footer_y.saturating_sub(area.y + 1) as usize;
+        let action_nav = if self.action_focus {
+            "tab search · ←/→ · enter · esc"
+        } else {
+            "tab actions · enter use · esc"
+        };
         let nav = if identity_hidden {
             "resize · esc cancel"
         } else if self.entries.is_empty() {
             "esc cancel"
         } else if self.filtered.is_empty() {
             "backspace · esc cancel"
-        } else if blocked && self.intent == PickerIntent::Edit {
+        } else if blocked
+            && (self.intent == PickerIntent::Edit
+                || (self.intent == PickerIntent::Browse && self.action == Action::Edit))
+        {
             "arrows · esc cancel · no edit"
         } else if blocked {
             "arrows · esc cancel · cannot use"
         } else if self.intent == PickerIntent::Edit {
             "arrows · enter edit · esc cancel"
+        } else if self.intent == PickerIntent::Browse {
+            action_nav
         } else {
             "arrows · enter use · esc cancel"
         };
@@ -687,8 +848,34 @@ impl PickerState {
                 ..area
             },
         );
+        let actions = if self.intent == PickerIntent::Browse && self.action_focus {
+            let selected = Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED);
+            let mut spans = Vec::new();
+            for (index, (action, label)) in [
+                (Action::Use, "use"),
+                (Action::Show, "show"),
+                (Action::Edit, "edit"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if index > 0 {
+                    spans.push(Span::raw("  "));
+                }
+                if self.action == action {
+                    spans.push(Span::styled(format!("[{label}]"), selected));
+                } else {
+                    spans.push(Span::raw(format!(" {label} ")));
+                }
+            }
+            Line::from(spans)
+        } else if self.intent == PickerIntent::Browse {
+            Line::from("use · show · edit")
+        } else {
+            Line::from("ph --help")
+        };
         frame.render_widget(
-            Paragraph::new("ph --help"),
+            Paragraph::new(actions),
             Rect {
                 y: area.y + area.height - 1,
                 height: 1,
@@ -762,9 +949,13 @@ impl PickerState {
             .iter()
             .map(|&index| ListItem::new(safe_text(&self.entries[index].prompt.name)));
         frame.render_stateful_widget(
-            List::new(items).highlight_symbol("> ").highlight_style(
-                Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED),
-            ),
+            List::new(items)
+                .highlight_symbol("> ")
+                .highlight_style(if self.action_focus {
+                    Style::default().add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                }),
             list_area,
             &mut self.selection,
         );
@@ -874,7 +1065,9 @@ fn shell_selector(name: &str) -> String {
 }
 
 fn display_destination(destination: &str) -> String {
-    if let Some(path) = destination.strip_prefix("Write ") {
+    if destination == "Copy to clipboard; show text if unavailable" {
+        "use · copy to clipboard; else show".into()
+    } else if let Some(path) = destination.strip_prefix("Write ") {
         format!("write · {path}")
     } else if let Some(rest) = destination.strip_prefix("Copy to clipboard") {
         format!("copy · clipboard{rest}")
@@ -1040,6 +1233,70 @@ mod tests {
             Decision::Continue
         );
         assert_eq!(state.query, "en");
+    }
+
+    #[test]
+    fn default_copy_effect_fits_at_forty_columns() {
+        let mut state = PickerState::new(vec![entry("review", "Review this change.")], "");
+        state.intent = PickerIntent::Browse;
+        state.destination = Some("Copy to clipboard; show text if unavailable".into());
+        let screen = painted(&mut state, 40, 18);
+        assert!(screen
+            .lines()
+            .any(|line| line.contains("use · copy to clipboard; else show")));
+    }
+
+    #[test]
+    fn action_focus_highlights_the_action_and_keeps_the_selected_result_marker() {
+        let mut state = PickerState::new(vec![entry("review", "Review")], "");
+        state.intent = PickerIntent::Browse;
+        state.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        state.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        let mut terminal = Terminal::new(TestBackend::new(40, 18)).unwrap();
+        terminal.draw(|frame| state.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut marker = None;
+        let mut bracket = None;
+        for y in 0..18 {
+            for x in 0..40 {
+                let cell = &buffer[(x, y)];
+                if cell.symbol() == ">" {
+                    marker = Some(cell.modifier);
+                }
+                if cell.symbol() == "[" {
+                    bracket = Some(cell.modifier);
+                }
+            }
+        }
+        assert!(marker.is_some_and(|style| !style.contains(Modifier::REVERSED)));
+        assert!(bracket.is_some_and(|style| style.contains(Modifier::REVERSED)));
+    }
+
+    #[test]
+    fn browse_actions_require_focus_and_editing_resets_the_pending_action() {
+        let mut state = PickerState::new(vec![entry("review", "Hello")], "rev");
+        state.intent = PickerIntent::Browse;
+        painted(&mut state, 40, 18);
+        state.key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        state.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(state.query, "rexv");
+        assert_eq!(state.action, Action::Use);
+        state.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        state.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        state.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(state.action, Action::Show);
+        let screen = painted(&mut state, 40, 18);
+        assert!(screen.contains("[show]"));
+        assert!(screen.contains("show · raw review"));
+        state.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(state.action, Action::Edit);
+        assert_eq!(
+            state.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Decision::Cancel
+        );
+        state.key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        assert_eq!(state.action, Action::Use);
+        assert!(!state.action_focus);
     }
 
     #[test]

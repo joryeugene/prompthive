@@ -183,20 +183,45 @@ pub fn run(command: Option<Commands>) -> Result<()> {
         }
         let storage = Storage::new()?;
         storage.init()?;
-        let (name, text) = render_use(
-            &storage,
-            None,
-            None,
-            &input,
-            &Default::default(),
-            |name| IoOptions::default().confirmation(name),
-            false,
-        )?;
-        return IoOptions::default().emit(&storage, &text, &name, None);
+        #[cfg(feature = "tui")]
+        {
+            use crate::tui::BareSelection;
+            return match crate::tui::pick_bare(&storage, &input)?
+                .ok_or_else(|| fail(130, "Cancelled; no prompt was used."))?
+            {
+                BareSelection::Use(name, text) => {
+                    IoOptions::default().emit(&storage, &text, &name, None)
+                }
+                BareSelection::Show(name) => {
+                    let (_, text) = storage.read_prompt(&name)?;
+                    let safe: String = text
+                        .chars()
+                        .flat_map(|c| {
+                            if c.is_control() && !matches!(c, '\n' | '\t') {
+                                c.escape_default().to_string().chars().collect::<Vec<_>>()
+                            } else {
+                                vec![c]
+                            }
+                        })
+                        .collect();
+                    write_stdout(&safe)
+                }
+                BareSelection::Edit(name) => {
+                    crate::edit::edit_prompt(&storage, &name)?;
+                    eprintln!("Saved {name}.");
+                    Ok(())
+                }
+            };
+        }
+        #[cfg(not(feature = "tui"))]
+        unreachable!("interactive() is false without the tui feature");
     }
     // Help/completions do not create or inspect a store.
     if let Some(Commands::Completion { shell }) = command {
         return super::completion::handle_completion(&shell).map_err(usage);
+    }
+    if matches!(command, Some(Commands::Update)) {
+        return super::update::run();
     }
     let storage = Storage::new()?;
     match command.expect("checked above") {
@@ -337,6 +362,6 @@ pub fn run(command: Option<Commands>) -> Result<()> {
             Storage::validate_name(&name).map_err(usage)?;Storage::validate_component(&version).map_err(usage)?;
             super::versioning::handle_rollback(&storage,&name,&version,backup,start)
         }
-        Commands::Completion{..}=>unreachable!(),
+        Commands::Completion{..}|Commands::Update=>unreachable!(),
     }.context("command failed")
 }

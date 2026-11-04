@@ -23,6 +23,8 @@ candidate="$candidate_dir/debug/ph"
 if [[ "${OS:-}" == Windows_NT || ( ! -f "$candidate" && -f "$candidate.exe" ) ]]; then
   candidate="$candidate.exe"
 fi
+python3 scripts/qa/bare_actions.py "$candidate"
+python3 scripts/qa/update.py "$candidate"
 PROMPTHIVE_BIN="$candidate" bash examples/creative_patterns.sh
 bash scripts/test-pipes "$candidate"
 bash scripts/test-interactive "$candidate"

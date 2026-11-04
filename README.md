@@ -10,14 +10,16 @@ Meet **Byt** (pronounced *byte*).
 
 ## Install
 
-Download and extract a [v0.4.0 source archive from GitHub](https://github.com/joryeugene/prompthive/releases/tag/v0.4.0), then run these commands from its directory:
+Install the latest published release from crates.io with Cargo:
 
 ```sh
-cargo install --path . --locked
+cargo install prompthive --locked
 ph --version
 ```
 
-This is a GitHub-only source release. `cargo install prompthive` uses crates.io and does not install this release. An existing installation does not update automatically; run the source command above to replace it.
+To build from a [GitHub source release](https://github.com/joryeugene/prompthive/releases), extract it and run `cargo install --path . --locked` in its directory. Existing installations do not update automatically.
+
+`ph update` attempts to update a crates.io installation in your Cargo home. It first rebuilds the installed version in a temporary directory and checks its bytes; a different toolchain or build environment may prevent a match. When an update is available, it asks you to confirm that the displayed installation is yours to update. Close other installers first: the check cannot prevent another program from changing the same file at the same time. If it cannot verify the installation, use the original installer instead. The command uses your existing Cargo executable and configuration, requires network access, and preserves the recorded target and feature choices. Windows and Cargo roots outside your home require a manual update.
 
 The default build includes the terminal picker. For a smaller build without it, add `--no-default-features`; exact-name commands and pipelines remain available.
 
@@ -25,7 +27,7 @@ On Linux, clipboard copying needs `wl-copy` on Wayland, or `xclip` or `xsel` on 
 
 ## Five actions to remember
 
-Start with `ph` in a terminal. Type to search, inspect the full name and preview, press Enter to use, or Escape to cancel. If a chosen template needs declared values, fill only the missing fields, inspect the final preview, and press Enter to finish. Prompts with all values already available keep the single Enter-to-use path. No selection is copied before you accept it. With no saved prompts, the picker offers a creation example.
+Start with `ph` in a terminal. Type to search, inspect the full name and preview, press Enter to use, or Escape to cancel. Press Tab to select an action, then use left and right to choose use, show the original text, or edit the saved prompt. Tab returns to search; left and right move the search cursor there. If a chosen template needs declared values, fill only the missing fields, inspect the final preview, and press Enter to finish. Prompts with all values already available keep the single Enter-to-use path. No selection is copied before you accept it. With no saved prompts, the picker offers a creation example.
 
 | Action | Short | Long | Example |
 | --- | --- | --- | --- |
