@@ -27,6 +27,8 @@ pub struct Destinations {
 }
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Update a verified Cargo installation from crates.io
+    Update,
     /// Render a prompt; omit NAME to search and preview
     #[command(
         visible_alias = "u",

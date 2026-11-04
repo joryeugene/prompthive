@@ -129,6 +129,27 @@ fn terminal_description(text: &str) -> String {
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect()
 }
+
+#[cfg(feature = "tui")]
+fn safe_terminal_body(text: &str) -> Result<String> {
+    let mut output = String::new();
+    for character in text.chars() {
+        if character.is_control() && !matches!(character, '\n' | '\t') {
+            for escaped in character.escape_default() {
+                let mut bytes = [0; 4];
+                crate::limits::push_str(
+                    &mut output,
+                    escaped.encode_utf8(&mut bytes),
+                    "shown text",
+                )?;
+            }
+        } else {
+            let mut bytes = [0; 4];
+            crate::limits::push_str(&mut output, character.encode_utf8(&mut bytes), "shown text")?;
+        }
+    }
+    Ok(output)
+}
 fn readable_prompts(storage: &Storage) -> Result<Vec<Prompt>> {
     let mut prompts = Vec::new();
     let mut budget = crate::limits::Budget::new(crate::limits::IMPORT_BYTES, "prompt search index");
@@ -183,20 +204,36 @@ pub fn run(command: Option<Commands>) -> Result<()> {
         }
         let storage = Storage::new()?;
         storage.init()?;
-        let (name, text) = render_use(
-            &storage,
-            None,
-            None,
-            &input,
-            &Default::default(),
-            |name| IoOptions::default().confirmation(name),
-            false,
-        )?;
-        return IoOptions::default().emit(&storage, &text, &name, None);
+        #[cfg(feature = "tui")]
+        {
+            use crate::tui::BareSelection;
+            return match crate::tui::pick_bare(&storage, &input)?
+                .ok_or_else(|| fail(130, "Cancelled; no prompt was used."))?
+            {
+                BareSelection::Use(name, text) => {
+                    IoOptions::default().emit(&storage, &text, &name, None)
+                }
+                BareSelection::Show(name) => {
+                    let (_, text) = storage.read_prompt(&name)?;
+                    let safe = safe_terminal_body(&text)?;
+                    write_stdout(&safe)
+                }
+                BareSelection::Edit(name) => {
+                    crate::edit::edit_prompt(&storage, &name)?;
+                    eprintln!("Saved {name}.");
+                    Ok(())
+                }
+            };
+        }
+        #[cfg(not(feature = "tui"))]
+        unreachable!("interactive() is false without the tui feature");
     }
     // Help/completions do not create or inspect a store.
     if let Some(Commands::Completion { shell }) = command {
         return super::completion::handle_completion(&shell).map_err(usage);
+    }
+    if matches!(command, Some(Commands::Update)) {
+        return super::update::run();
     }
     let storage = Storage::new()?;
     match command.expect("checked above") {
@@ -337,6 +374,21 @@ pub fn run(command: Option<Commands>) -> Result<()> {
             Storage::validate_name(&name).map_err(usage)?;Storage::validate_component(&version).map_err(usage)?;
             super::versioning::handle_rollback(&storage,&name,&version,backup,start)
         }
-        Commands::Completion{..}=>unreachable!(),
+        Commands::Completion{..}|Commands::Update=>unreachable!(),
     }.context("command failed")
+}
+
+#[cfg(all(test, feature = "tui"))]
+mod terminal_body_tests {
+    use super::safe_terminal_body;
+
+    #[test]
+    fn show_escapes_controls_and_bounds_expansion() {
+        assert_eq!(
+            safe_terminal_body("hello\n\x1b]52;\x07").unwrap(),
+            "hello\n\\u{1b}]52;\\u{7}"
+        );
+        let controls = "\x1b".repeat(crate::limits::TEXT_BYTES / 6 + 1);
+        assert!(safe_terminal_body(&controls).is_err());
+    }
 }
