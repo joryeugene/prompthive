@@ -294,6 +294,14 @@ impl Storage {
     }
 
     pub fn read_prompt(&self, name: &str) -> Result<(PromptMetadata, String)> {
+        let (metadata, body, _) = self.read_prompt_with_description_origin(name)?;
+        Ok((metadata, body))
+    }
+
+    pub(crate) fn read_prompt_with_description_origin(
+        &self,
+        name: &str,
+    ) -> Result<(PromptMetadata, String, bool)> {
         let bytes = self.read_raw(name)?;
         let text = std::str::from_utf8(&bytes)
             .with_context(|| format!("prompt {name} is not valid UTF-8"))?;
@@ -303,6 +311,7 @@ impl Storage {
         if metadata.id.is_empty() {
             metadata.id = name.to_string();
         }
+        let has_description = !metadata.description.trim().is_empty();
         if metadata.description.is_empty() {
             metadata.description = body
                 .lines()
@@ -312,7 +321,7 @@ impl Storage {
                 .take(80)
                 .collect();
         }
-        Ok((metadata, body))
+        Ok((metadata, body, has_description))
     }
 
     pub fn parse_prompt_content(&self, content: &str) -> Result<(PromptMetadata, String)> {
