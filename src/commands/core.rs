@@ -129,6 +129,27 @@ fn terminal_description(text: &str) -> String {
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect()
 }
+
+#[cfg(feature = "tui")]
+fn safe_terminal_body(text: &str) -> Result<String> {
+    let mut output = String::new();
+    for character in text.chars() {
+        if character.is_control() && !matches!(character, '\n' | '\t') {
+            for escaped in character.escape_default() {
+                let mut bytes = [0; 4];
+                crate::limits::push_str(
+                    &mut output,
+                    escaped.encode_utf8(&mut bytes),
+                    "shown text",
+                )?;
+            }
+        } else {
+            let mut bytes = [0; 4];
+            crate::limits::push_str(&mut output, character.encode_utf8(&mut bytes), "shown text")?;
+        }
+    }
+    Ok(output)
+}
 fn readable_prompts(storage: &Storage) -> Result<Vec<Prompt>> {
     let mut prompts = Vec::new();
     let mut budget = crate::limits::Budget::new(crate::limits::IMPORT_BYTES, "prompt search index");
@@ -194,16 +215,7 @@ pub fn run(command: Option<Commands>) -> Result<()> {
                 }
                 BareSelection::Show(name) => {
                     let (_, text) = storage.read_prompt(&name)?;
-                    let safe: String = text
-                        .chars()
-                        .flat_map(|c| {
-                            if c.is_control() && !matches!(c, '\n' | '\t') {
-                                c.escape_default().to_string().chars().collect::<Vec<_>>()
-                            } else {
-                                vec![c]
-                            }
-                        })
-                        .collect();
+                    let safe = safe_terminal_body(&text)?;
                     write_stdout(&safe)
                 }
                 BareSelection::Edit(name) => {
@@ -364,4 +376,19 @@ pub fn run(command: Option<Commands>) -> Result<()> {
         }
         Commands::Completion{..}|Commands::Update=>unreachable!(),
     }.context("command failed")
+}
+
+#[cfg(all(test, feature = "tui"))]
+mod terminal_body_tests {
+    use super::safe_terminal_body;
+
+    #[test]
+    fn show_escapes_controls_and_bounds_expansion() {
+        assert_eq!(
+            safe_terminal_body("hello\n\x1b]52;\x07").unwrap(),
+            "hello\n\\u{1b}]52;\\u{7}"
+        );
+        let controls = "\x1b".repeat(crate::limits::TEXT_BYTES / 6 + 1);
+        assert!(safe_terminal_body(&controls).is_err());
+    }
 }

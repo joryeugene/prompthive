@@ -28,6 +28,7 @@ use std::{
     },
     time::Duration,
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
     matching::{ranked_prompts, Prompt},
@@ -177,6 +178,7 @@ fn pick_with<T>(
                 let text: String = text.chars().filter(|c| !c.is_control()).collect();
                 state.query.insert_str(state.cursor, &text);
                 state.cursor += text.len();
+                state.align_cursor();
                 state.action_focus = false;
                 state.action = Action::Use;
                 state.refilter();
@@ -458,6 +460,15 @@ struct PickerState {
 }
 
 impl PickerState {
+    fn align_cursor(&mut self) {
+        self.cursor = self
+            .query
+            .grapheme_indices(true)
+            .map(|(index, _)| index)
+            .chain(std::iter::once(self.query.len()))
+            .find(|&index| index >= self.cursor)
+            .unwrap_or(self.query.len());
+    }
     fn new(entries: Vec<Entry>, query: &str) -> Self {
         let mut state = Self {
             intent: PickerIntent::Use,
@@ -595,34 +606,36 @@ impl PickerState {
             }
             KeyCode::Left => {
                 self.cursor = self.query[..self.cursor]
-                    .char_indices()
+                    .grapheme_indices(true)
                     .next_back()
                     .map_or(0, |(i, _)| i);
             }
             KeyCode::Right => {
                 self.cursor += self.query[self.cursor..]
-                    .chars()
+                    .graphemes(true)
                     .next()
-                    .map_or(0, char::len_utf8);
+                    .map_or(0, str::len);
             }
             KeyCode::Home => self.cursor = 0,
             KeyCode::End => self.cursor = self.query.len(),
             KeyCode::Backspace => {
                 if self.cursor > 0 {
                     let start = self.query[..self.cursor]
-                        .char_indices()
+                        .grapheme_indices(true)
                         .next_back()
                         .map_or(0, |(i, _)| i);
                     self.query.drain(start..self.cursor);
                     self.cursor = start;
+                    self.align_cursor();
                     self.action = Action::Use;
                     self.action_focus = false;
                     self.refilter();
                 }
             }
             KeyCode::Delete => {
-                if let Some(ch) = self.query[self.cursor..].chars().next() {
-                    self.query.drain(self.cursor..self.cursor + ch.len_utf8());
+                if let Some(grapheme) = self.query[self.cursor..].graphemes(true).next() {
+                    self.query.drain(self.cursor..self.cursor + grapheme.len());
+                    self.align_cursor();
                     self.action = Action::Use;
                     self.action_focus = false;
                     self.refilter();
@@ -636,6 +649,7 @@ impl PickerState {
                 {
                     self.query.insert(self.cursor, character);
                     self.cursor += character.len_utf8();
+                    self.align_cursor();
                     self.action = Action::Use;
                     self.action_focus = false;
                     self.refilter();
@@ -831,6 +845,15 @@ impl PickerState {
                 || (self.intent == PickerIntent::Browse && self.action == Action::Edit))
         {
             "arrows · esc cancel · no edit"
+        } else if blocked
+            && self.intent == PickerIntent::Browse
+            && self.selected().is_some_and(|entry| entry.editable)
+        {
+            if self.action_focus {
+                "←/→ edit · esc cancel"
+            } else {
+                "tab actions · esc cancel"
+            }
         } else if blocked {
             "arrows · esc cancel · cannot use"
         } else if self.intent == PickerIntent::Edit {
@@ -1297,6 +1320,36 @@ mod tests {
         state.key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
         assert_eq!(state.action, Action::Use);
         assert!(!state.action_focus);
+    }
+
+    #[test]
+    fn search_cursor_moves_and_deletes_whole_graphemes() {
+        let mut state = PickerState::new(vec![entry("review", "Hello")], "e\u{301}x");
+        state.key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        state.key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(state.cursor, 0);
+        state.key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::NONE));
+        assert_eq!(state.query, "Ae\u{301}x");
+        state.key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(state.query, "Ax");
+    }
+
+    #[test]
+    fn malformed_editable_prompt_keeps_its_action_hint() {
+        let mut broken = entry("broken", "");
+        broken.error = Some("malformed".into());
+        let mut state = PickerState::new(vec![broken], "broken");
+        state.intent = PickerIntent::Browse;
+        assert!(painted(&mut state, 40, 18).contains("tab actions"));
+        state.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        state.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        state.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(state.action, Action::Edit);
+        painted(&mut state, 40, 18);
+        assert_eq!(
+            state.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Decision::Use("broken".into())
+        );
     }
 
     #[test]

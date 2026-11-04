@@ -1046,6 +1046,7 @@ dependencies = [
  "signal-hook",
  "tempfile",
  "toml",
+ "unicode-segmentation",
  "uuid",
  "walkdir",
 ]

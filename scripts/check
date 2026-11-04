@@ -24,7 +24,12 @@ if [[ "${OS:-}" == Windows_NT || ( ! -f "$candidate" && -f "$candidate.exe" ) ]]
   candidate="$candidate.exe"
 fi
 python3 scripts/qa/bare_actions.py "$candidate"
-python3 scripts/qa/update.py "$candidate"
+cargo build --locked --offline --release --bin ph
+update_candidate="$candidate_dir/release/ph"
+if [[ "${OS:-}" == Windows_NT || ( ! -f "$update_candidate" && -f "$update_candidate.exe" ) ]]; then
+  update_candidate="$update_candidate.exe"
+fi
+python3 scripts/qa/update.py "$update_candidate"
 PROMPTHIVE_BIN="$candidate" bash examples/creative_patterns.sh
 bash scripts/test-pipes "$candidate"
 bash scripts/test-interactive "$candidate"

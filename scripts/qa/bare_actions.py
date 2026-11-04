@@ -14,7 +14,7 @@ for action, keys in [('show', b'\t\x1b[C\r'), ('edit', b'\t\x1b[C\x1b[C\r'), ('c
         root = Path(temp)
         prompt = root / 'store/prompts/review.md'
         prompt.parent.mkdir(parents=True)
-        original = 'Review this safely.\n'
+        original = 'Review this safely.\n\x1b]52;c;YWJj\x07'
         prompt.write_text(original)
         editor = root / 'editor'
         editor.write_text('#!/bin/sh\nprintf "Edited safely.\\n" > "$1"\n')
@@ -41,11 +41,21 @@ for action, keys in [('show', b'\t\x1b[C\r'), ('edit', b'\t\x1b[C\x1b[C\r'), ('c
                 child.send_signal(signal.SIGKILL)
                 raise RuntimeError(f'{action}: timed out')
             child.wait(timeout=2)
+            while select.select([master], [], [], 0)[0]:
+                try:
+                    chunk = os.read(master, 65536)
+                    if not chunk: break
+                    output.extend(chunk)
+                except OSError:
+                    break
             restored = terminal_modes(slave) == before
             if not sent or not restored:
                 raise AssertionError(f'{action}: sent={sent}, restored={restored}')
             if action == 'show':
-                assert child.returncode == 0 and b'Review this safely.' in output and prompt.read_text() == original
+                assert b'\x1b[?1049l' in output, 'alternate screen did not close'
+                shown = output.rsplit(b'\x1b[?1049l', 1)[1]
+                assert child.returncode == 0 and b'Review this safely.' in shown and prompt.read_text() == original
+                assert b'\x1b]52;' not in shown and b'\\u{1b}]52;c;YWJj\\u{7}' in shown, shown
             elif action == 'edit':
                 assert child.returncode == 0 and 'Edited safely.' in prompt.read_text()
             else:
