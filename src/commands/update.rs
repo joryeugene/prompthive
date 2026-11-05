@@ -116,13 +116,13 @@ fn digest(path: &Path) -> Result<[u8; 32]> {
     Ok(hash.finalize().into())
 }
 
-fn installed_version(root: &Path) -> Result<String> {
+fn installed_release(root: &Path) -> Result<(String, String)> {
     let data: Metadata = serde_json::from_str(&metadata(root)?).context(HELP)?;
     let mut owners = data
         .installs
         .iter()
         .filter(|(_, item)| item.bins.iter().any(|bin| bin == "ph"));
-    let (key, _) = owners.next().context(HELP)?;
+    let (key, item) = owners.next().context(HELP)?;
     if owners.next().is_some() {
         bail!(HELP);
     }
@@ -130,10 +130,10 @@ fn installed_version(root: &Path) -> Result<String> {
         .strip_prefix("prompthive ")
         .and_then(|v| v.strip_suffix(&format!(" ({REGISTRY})")))
         .context(HELP)?;
-    if !safe_arg(version) {
+    if !safe_arg(version) || !safe_arg(&item.target) {
         bail!(HELP);
     }
-    Ok(version.to_owned())
+    Ok((version.to_owned(), item.target.clone()))
 }
 
 fn cargo(args: &[OsString]) -> Result<()> {
@@ -143,7 +143,7 @@ fn cargo(args: &[OsString]) -> Result<()> {
         .status()
         .context("could not start Cargo")?;
     if !status.success() {
-        bail!("Cargo failed ({status}); inspect its output above");
+        bail!("Cargo failed ({status}); check any Cargo output above and your Cargo setup, or use the original installer");
     }
     Ok(())
 }
@@ -184,7 +184,16 @@ pub fn run() -> Result<()> {
     let root = exe.parent().and_then(Path::parent).context(HELP)?;
     let original_metadata = metadata(root)?;
     let original_tracking = tracking_file(root, ".crates.toml")?;
-    let (_, args) = plan(&exe, &original_metadata)?;
+    let (_, mut args) = plan(&exe, &original_metadata)?;
+    let target_index = args
+        .iter()
+        .position(|arg| arg == "--target")
+        .context(HELP)?;
+    let expected_target = args
+        .get(target_index + 1)
+        .and_then(|arg| arg.to_str())
+        .context(HELP)?
+        .to_owned();
     let before = digest(&exe).context(HELP)?;
 
     // Cargo's metadata alone is not proof of the current bytes. Rebuild the
@@ -192,7 +201,7 @@ pub fn run() -> Result<()> {
     // Different toolchains/build paths may not reproduce; those users get a
     // manual-update fallback rather than a forced replacement.
     eprintln!("checking this Cargo installation with a temporary rebuild...");
-    let staging = tempfile::Builder::new()
+    let mut staging = tempfile::Builder::new()
         .prefix("ph-update-check-")
         .tempdir()?;
     let mut check_args = args.clone();
@@ -208,16 +217,46 @@ pub fn run() -> Result<()> {
     ]);
     cargo(&check_args)?;
     let staged = staging.path().join("bin").join("ph");
-    if installed_version(staging.path())? != env!("CARGO_PKG_VERSION") || digest(&staged)? != before
-    {
-        bail!("the installed binary does not match a reproducible Cargo build; update with the original installer");
+    let (version, target) = installed_release(staging.path())?;
+    if version != env!("CARGO_PKG_VERSION") || target != expected_target {
+        bail!("Cargo rebuilt a different version or target; no update was started");
     }
+    if digest(&staged)? != before {
+        // Cargo records the target but not whether --target was supplied.
+        // A default-target build can differ even for the same host triple.
+        eprintln!("checking the installation with Cargo's default target...");
+        let fallback = tempfile::Builder::new()
+            .prefix("ph-update-check-")
+            .tempdir()?;
+        let mut default_args = args.clone();
+        default_args.drain(target_index..target_index + 2);
+        let mut default_check = default_args.clone();
+        default_check[root_index] = fallback.path().as_os_str().to_owned();
+        default_check.extend([
+            "--version".into(),
+            format!("={}", env!("CARGO_PKG_VERSION")).into(),
+        ]);
+        cargo(&default_check)?;
+        let (version, target) = installed_release(fallback.path())?;
+        if version != env!("CARGO_PKG_VERSION")
+            || target != expected_target
+            || digest(&fallback.path().join("bin").join("ph"))? != before
+        {
+            bail!("the installed binary does not match a reproducible Cargo build; update with the original installer");
+        }
+        args = default_args;
+        staging = fallback;
+    }
+    let staged = staging.path().join("bin").join("ph");
     // Build the prospective version in the same temporary root first. Cargo,
     // its configured registry and build environment are trusted inputs.
     let mut newest_args = args.clone();
     newest_args[root_index] = staging.path().as_os_str().to_owned();
     cargo(&newest_args)?;
-    let target_version = installed_version(staging.path())?;
+    let (target_version, staged_target) = installed_release(staging.path())?;
+    if staged_target != expected_target {
+        bail!("Cargo selected a different compilation target; no update was started");
+    }
     let target_digest = digest(&staged)?;
     let staged_version = Command::new(&staged)
         .arg("--version")
@@ -238,7 +277,11 @@ pub fn run() -> Result<()> {
     if !std::io::stdin().is_terminal() {
         bail!("an interactive terminal is required to confirm ownership before replacing this executable");
     }
-    eprint!("Cargo metadata cannot prove who manages {}. Close other installers first. Update your Cargo-managed installation to ph {target_version}? [y/N] ", exe.display());
+    eprintln!("Cargo metadata cannot prove who manages {}.", exe.display());
+    eprintln!(
+        "Close other installers first. If unsure, answer no and use your original installer."
+    );
+    eprint!("Update this Cargo-managed installation to ph {target_version}? [y/N] ");
     std::io::stderr().flush()?;
     let mut answer = String::new();
     std::io::stdin().lock().take(16).read_line(&mut answer)?;
@@ -271,9 +314,12 @@ pub fn run() -> Result<()> {
     install_args.extend(["--version".into(), format!("={target_version}").into()]);
     let result = (|| -> Result<String> {
         cargo(&install_args)?;
-        let version = installed_version(root)
+        let (version, installed_target) = installed_release(root)
             .context("Cargo finished, but its installed version could not be verified")?;
-        if version != target_version || digest(&exe)? != target_digest {
+        if version != target_version
+            || installed_target != expected_target
+            || digest(&exe)? != target_digest
+        {
             bail!(
                 "Cargo finished, but the executable could not be verified against the staged build"
             );
@@ -284,7 +330,7 @@ pub fn run() -> Result<()> {
         Ok(version) => version,
         Err(error) => {
             let path = backup.keep();
-            bail!("{error:#}. The installation may have changed. A copy of the previous executable and Cargo metadata is saved at {}; inspect it before recovery; nothing was automatically restored", path.display());
+            bail!("{error:#}. The installation may have changed. A copy of the previous executable and Cargo metadata is saved at {}; nothing was automatically restored; see Update recovery in the README before replacing files", path.display());
         }
     };
     if version == env!("CARGO_PKG_VERSION") {

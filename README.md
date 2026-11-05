@@ -21,9 +21,15 @@ To build from a [GitHub source release](https://github.com/joryeugene/prompthive
 
 `ph update` attempts to update a crates.io installation in your Cargo home. It first rebuilds the installed version in a temporary directory and checks its bytes; a different toolchain or build environment may prevent a match. When an update is available, it asks you to confirm that the displayed installation is yours to update. Close other installers first: the check cannot prevent another program from changing the same file at the same time. If it cannot verify the installation, use the original installer instead. The command uses your existing Cargo executable and configuration, requires network access, and preserves the recorded target and feature choices. Windows and Cargo roots outside your home require a manual update.
 
+If `ph update` fails on an older Cargo installation, use `cargo install prompthive --locked` to install the latest published version. The fix is included in 0.6.1 once it is published; 0.6.0 still has the issue. For a custom installation, supply the same `--root`, `--target`, and feature options used originally. If you installed Prompthive through another package manager, use that installer instead.
+
 The default build includes the terminal picker. For a smaller build without it, add `--no-default-features`; exact-name commands and pipelines remain available.
 
 On Linux, clipboard copying needs `wl-copy` on Wayland, or `xclip` or `xsel` on X11, plus a working desktop session. Prompthive starts no clipboard daemon of its own. Use a pipe or `-q` without a clipboard. An explicit copy request fails clearly when copying is unavailable.
+
+### Update recovery
+
+If an update fails after installation starts, stop other installers and keep the recovery directory shown by `ph`. It contains the previous executable and Cargo tracking files. Compare the current files with those copies before deciding how to recover. Do not blindly overwrite the executable or Cargo tracking files: the current files may contain changes from other installations. Use your original installer or seek help if you are unsure how to reconcile them.
 
 ## Five actions to remember
 
