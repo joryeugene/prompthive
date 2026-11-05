@@ -330,7 +330,7 @@ pub fn run() -> Result<()> {
         Ok(version) => version,
         Err(error) => {
             let path = backup.keep();
-            bail!("{error:#}. The installation may have changed. A copy of the previous executable and Cargo metadata is saved at {}; inspect it before recovery; nothing was automatically restored", path.display());
+            bail!("{error:#}. The installation may have changed. A copy of the previous executable and Cargo metadata is saved at {}; nothing was automatically restored; see Update recovery in the README before replacing files", path.display());
         }
     };
     if version == env!("CARGO_PKG_VERSION") {

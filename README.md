@@ -27,6 +27,10 @@ The default build includes the terminal picker. For a smaller build without it, 
 
 On Linux, clipboard copying needs `wl-copy` on Wayland, or `xclip` or `xsel` on X11, plus a working desktop session. Prompthive starts no clipboard daemon of its own. Use a pipe or `-q` without a clipboard. An explicit copy request fails clearly when copying is unavailable.
 
+### Update recovery
+
+If an update fails after installation starts, stop other installers and keep the recovery directory shown by `ph`. It contains the previous executable and Cargo tracking files. Compare the current files with those copies before deciding how to recover. Do not blindly overwrite the executable or Cargo tracking files: the current files may contain changes from other installations. Use your original installer or seek help if you are unsure how to reconcile them.
+
 ## Five actions to remember
 
 Start with `ph` in a terminal. Type to search, inspect the full name and preview, press Enter to use, or Escape to cancel. Press Tab to select an action, then use left and right to choose use, show the original text, or edit the saved prompt. Tab returns to search; left and right move the search cursor there. If a chosen template needs declared values, fill only the missing fields, inspect the final preview, and press Enter to finish. Prompts with all values already available keep the single Enter-to-use path. No selection is copied before you accept it. With no saved prompts, the picker offers a creation example.

@@ -130,7 +130,7 @@ for mode in ('default_updated','default_current','default_wrong_target','default
         if mode=='signal': assert exe.read_bytes()==b'partial installation'
         backups=list(root.glob('ph-update-backup-*'))
         if mode in ('false_success','wrong_bytes','failure_after','race','signal','default_final_target','default_failure_before','default_failure_after'):
-            assert len(backups)==1 and (backups[0]/'ph').read_bytes()==original and (backups[0]/'.crates2.json').read_bytes()==json.dumps(initial).encode() and (backups[0]/'.crates.toml').read_bytes()==b'[v1]\nfixture = []\n' and (b'The installation may have changed' in result.stderr if mode!='signal' else b'recovery copy:' in result.stderr),(mode,result.stderr,backups)
+            assert len(backups)==1 and (backups[0]/'ph').read_bytes()==original and (backups[0]/'.crates2.json').read_bytes()==json.dumps(initial).encode() and (backups[0]/'.crates.toml').read_bytes()==b'[v1]\nfixture = []\n' and (b'The installation may have changed' in result.stderr and b'see Update recovery in the README before replacing files' in result.stderr if mode!='signal' else b'recovery copy:' in result.stderr),(mode,result.stderr,backups)
         else: assert not backups,(mode,backups)
         for args in log:
             assert '--force' not in args and '--locked' in args and '--no-default-features' in args and args[args.index('--features')+1]=='tui' and args[args.index('--registry')+1]=='crates-io',(mode,args)
