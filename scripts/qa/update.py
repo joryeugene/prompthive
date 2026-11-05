@@ -37,29 +37,39 @@ if mode=='signal' and not stage:
     pathlib.Path(os.environ['FAKE_READY']).write_text('ready')
     import time; time.sleep(60)
 if mode=='failure': sys.exit(7)
+if mode=='default_failure' and initial and '--target' not in args: sys.exit(7)
+if mode=='default_failure_before' and not stage: sys.exit(7)
 if initial:
     (root/'bin').mkdir(parents=True,exist_ok=True)
-    if mode=='mismatch': (root/'bin/ph').write_bytes(b'unrelated')
+    if mode=='mismatch' or (mode.startswith('default_') and '--target' in args): (root/'bin/ph').write_bytes(b'unrelated')
     else: shutil.copy2(os.environ['FAKE_ORIGINAL'],root/'bin/ph')
-    (root/'.crates2.json').write_text(os.environ['FAKE_META'])
+    data=json.loads(os.environ['FAKE_NEW_META'] if mode=='explicit_wrong_version' else os.environ['FAKE_META'])
+    if mode=='default_wrong_target' and '--target' not in args:
+        next(iter(data['installs'].values()))['target']='aarch64-unknown-linux-gnu'
+    if mode=='explicit_wrong_target':
+        next(iter(data['installs'].values()))['target']='aarch64-unknown-linux-gnu'
+    (root/'.crates2.json').write_text(json.dumps(data))
 else:
-    if mode in ('updated','declined','false_success','advance','wrong_bytes','failure_after','race','signal') and (stage or mode not in ('false_success','wrong_bytes','failure_after','race','signal')):
+    if mode in ('updated','declined','false_success','advance','wrong_bytes','failure_after','race','signal','default_updated','default_stage_target','default_final_target','default_failure_before','default_failure_after') and (stage or mode not in ('false_success','wrong_bytes','failure_after','race','signal','default_failure_after')):
         replacement=root/'bin/new-ph'
         replacement.write_text('#!/bin/sh\nprintf "ph %s\\n"\n' % os.environ['FAKE_NEXT'])
         replacement.chmod(0o700)
         replacement.replace(root/'bin/ph')
-        (root/'.crates2.json').write_text(os.environ['FAKE_NEW_META'])
+        data=json.loads(os.environ['FAKE_NEW_META'])
+        if (mode=='default_stage_target' and stage) or (mode=='default_final_target' and not stage):
+            next(iter(data['installs'].values()))['target']='aarch64-unknown-linux-gnu'
+        (root/'.crates2.json').write_text(json.dumps(data))
     elif mode=='false_success' and not stage:
         (root/'.crates2.json').write_text(os.environ['FAKE_NEW_META'])
-    elif mode in ('wrong_bytes','failure_after','race') and not stage:
+    elif mode in ('wrong_bytes','failure_after','race','default_failure_after') and not stage:
         replacement=root/'bin/new-ph'
         replacement.write_text('#!/bin/sh\nprintf "ph %s\\n"\n# unexpected bytes\n' % os.environ['FAKE_NEXT'])
         replacement.chmod(0o700)
         replacement.replace(root/'bin/ph')
         (root/'.crates2.json').write_text(os.environ['FAKE_NEW_META'])
-        if mode in ('failure_after','race','signal'): sys.exit(7)
+        if mode in ('failure_after','race','signal','default_failure_after'): sys.exit(7)
 '''
-for mode in ('updated','current','mismatch','failure','false_success','wrong_source','declined','non_tty','advance','wrong_bytes','failure_after','race','signal','alias'):
+for mode in ('default_updated','default_current','default_wrong_target','default_stage_target','default_final_target','default_failure','default_failure_before','default_failure_after','explicit_wrong_version','explicit_wrong_target','updated','current','mismatch','failure','false_success','wrong_source','declined','non_tty','advance','wrong_bytes','failure_after','race','signal','alias'):
     with tempfile.TemporaryDirectory(prefix='ph-update-test-') as tmp:
         base=pathlib.Path(tmp)
         if mode=='alias':
@@ -97,24 +107,34 @@ for mode in ('updated','current','mismatch','failure','false_success','wrong_sou
             if slave is not None: os.close(slave)
         log=[json.loads(line) for line in (home/'log').read_text().splitlines()] if (home/'log').exists() else []
         assert result.stdout==b'',(mode,result.stdout)
-        if mode in ('updated','advance','alias'):
-            assert result.returncode==0 and f'updated: ph {next_version}'.encode() in result.stderr and len(log)==3,(mode,result.stderr,log)
-        elif mode=='current':
-            assert result.returncode==0 and f'ph {current} is already current'.encode() in result.stderr and len(log)==2,(mode,result.stderr,log)
+        if mode in ('updated','advance','alias','default_updated'):
+            assert result.returncode==0 and f'updated: ph {next_version}'.encode() in result.stderr and len(log)==(4 if mode=='default_updated' else 3),(mode,result.stderr,log)
+        elif mode in ('current','default_current'):
+            assert result.returncode==0 and f'ph {current} is already current'.encode() in result.stderr and len(log)==(3 if mode=='default_current' else 2),(mode,result.stderr,log)
         else:
             assert result.returncode!=0,(mode,result.stderr,log)
-            if mode in ('mismatch','failure','wrong_source','declined','non_tty'):
+            if mode in ('mismatch','failure','wrong_source','declined','non_tty','default_wrong_target','default_stage_target','default_failure','default_failure_before','explicit_wrong_version','explicit_wrong_target'):
                 assert exe.read_bytes()==original
-            assert len(log)==(0 if mode=='wrong_source' else 1 if mode in ('mismatch','failure') else 2 if mode in ('declined','non_tty') else 3),(mode,log)
-        if mode in ('updated','advance','alias'):
+            assert len(log)==(0 if mode=='wrong_source' else 1 if mode in ('failure','explicit_wrong_version','explicit_wrong_target') else 2 if mode in ('mismatch','declined','non_tty','default_wrong_target','default_failure') else 4 if mode in ('default_final_target','default_failure_before','default_failure_after') else 3),(mode,log)
+            if mode in ('default_failure','default_failure_before','default_failure_after'):
+                assert b'Cargo failed' in result.stderr,(mode,result.stderr)
+            if mode=='default_stage_target':
+                assert b'Cargo selected a different compilation target; no update was started' in result.stderr,(mode,result.stderr)
+            if mode in ('explicit_wrong_version','explicit_wrong_target'):
+                assert b'Cargo rebuilt a different version or target; no update was started' in result.stderr,(mode,result.stderr)
+        if mode in ('updated','advance','alias','default_updated','default_final_target'):
             assert log[-1][log[-1].index('--version')+1] == f'={next_version}'
         if mode=='advance': assert (home/'registry').read_text()=='99.0.2'
         if mode=='race': assert exe.read_bytes()==b'external installer replacement'
         if mode=='signal': assert exe.read_bytes()==b'partial installation'
         backups=list(root.glob('ph-update-backup-*'))
-        if mode in ('false_success','wrong_bytes','failure_after','race','signal'):
+        if mode in ('false_success','wrong_bytes','failure_after','race','signal','default_final_target','default_failure_before','default_failure_after'):
             assert len(backups)==1 and (backups[0]/'ph').read_bytes()==original and (backups[0]/'.crates2.json').read_bytes()==json.dumps(initial).encode() and (backups[0]/'.crates.toml').read_bytes()==b'[v1]\nfixture = []\n' and (b'The installation may have changed' in result.stderr if mode!='signal' else b'recovery copy:' in result.stderr),(mode,result.stderr,backups)
         else: assert not backups,(mode,backups)
         for args in log:
             assert '--force' not in args and '--locked' in args and '--no-default-features' in args and args[args.index('--features')+1]=='tui' and args[args.index('--registry')+1]=='crates-io',(mode,args)
+        if mode.startswith('default_') or mode=='mismatch':
+            assert '--target' in log[0] and all('--target' not in args for args in log[1:]),(mode,log)
+        else:
+            assert all('--target' in args for args in log),(mode,log)
         print(f'PASS {mode}: cargo invocations={len(log)}, exit={result.returncode}, stdout empty')
