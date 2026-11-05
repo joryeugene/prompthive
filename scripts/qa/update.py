@@ -108,6 +108,7 @@ for mode in ('default_updated','default_current','default_wrong_target','default
         log=[json.loads(line) for line in (home/'log').read_text().splitlines()] if (home/'log').exists() else []
         assert result.stdout==b'',(mode,result.stdout)
         if mode in ('updated','advance','alias','default_updated'):
+            assert b'If unsure, answer no and use your original installer.' in result.stderr,(mode,result.stderr)
             assert result.returncode==0 and f'updated: ph {next_version}'.encode() in result.stderr and len(log)==(4 if mode=='default_updated' else 3),(mode,result.stderr,log)
         elif mode in ('current','default_current'):
             assert result.returncode==0 and f'ph {current} is already current'.encode() in result.stderr and len(log)==(3 if mode=='default_current' else 2),(mode,result.stderr,log)
@@ -117,7 +118,7 @@ for mode in ('default_updated','default_current','default_wrong_target','default
                 assert exe.read_bytes()==original
             assert len(log)==(0 if mode=='wrong_source' else 1 if mode in ('failure','explicit_wrong_version','explicit_wrong_target') else 2 if mode in ('mismatch','declined','non_tty','default_wrong_target','default_failure') else 4 if mode in ('default_final_target','default_failure_before','default_failure_after') else 3),(mode,log)
             if mode in ('default_failure','default_failure_before','default_failure_after'):
-                assert b'Cargo failed' in result.stderr,(mode,result.stderr)
+                assert b'Cargo failed' in result.stderr and b'check any Cargo output above and your Cargo setup, or use the original installer' in result.stderr,(mode,result.stderr)
             if mode=='default_stage_target':
                 assert b'Cargo selected a different compilation target; no update was started' in result.stderr,(mode,result.stderr)
             if mode in ('explicit_wrong_version','explicit_wrong_target'):

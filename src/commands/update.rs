@@ -143,7 +143,7 @@ fn cargo(args: &[OsString]) -> Result<()> {
         .status()
         .context("could not start Cargo")?;
     if !status.success() {
-        bail!("Cargo failed ({status}); inspect its output above");
+        bail!("Cargo failed ({status}); check any Cargo output above and your Cargo setup, or use the original installer");
     }
     Ok(())
 }
@@ -277,7 +277,11 @@ pub fn run() -> Result<()> {
     if !std::io::stdin().is_terminal() {
         bail!("an interactive terminal is required to confirm ownership before replacing this executable");
     }
-    eprint!("Cargo metadata cannot prove who manages {}. Close other installers first. Update your Cargo-managed installation to ph {target_version}? [y/N] ", exe.display());
+    eprintln!("Cargo metadata cannot prove who manages {}.", exe.display());
+    eprintln!(
+        "Close other installers first. If unsure, answer no and use your original installer."
+    );
+    eprint!("Update this Cargo-managed installation to ph {target_version}? [y/N] ");
     std::io::stderr().flush()?;
     let mut answer = String::new();
     std::io::stdin().lock().take(16).read_line(&mut answer)?;
